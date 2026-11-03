@@ -45,7 +45,7 @@ Ticket details show the originating Trigger, Decision and reason, scope and Poli
 
 The header search finds Triggers by text, id, Feishu message id or a stored link, such as a GitHub comment URL. A Feishu link missing from the original message becomes searchable only after the host reads it during the current process lifetime.
 
-Search also finds Threads by references such as `#12` or a GitHub URL, and Tickets by title or a matching Thread.
+Search also finds Threads by `#12` (Issue), `!12` (GitLab MR), a bare number (both GitLab namespaces) or the selected host's URL, and Tickets by title or a matching Thread. Execution settings select GitHub or GitLab; this is separate from each Source's intake switch. GitLab is initially off.
 
 ## Principles
 

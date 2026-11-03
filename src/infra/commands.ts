@@ -4,6 +4,7 @@ import { basename } from 'node:path'
 import { promisify } from 'node:util'
 import { z } from 'zod'
 import type { Deployment } from '../deployment.ts'
+import { gitlabEnvironment } from './environment.ts'
 
 const exec = promisify(execFile)
 const TIMEOUT_MS = 90_000
@@ -65,36 +66,77 @@ export class Commands {
   get deployment(): Deployment { return this.resolved() }
   get repository(): string { return this.deployment.repository }
   withSignal(signal?: AbortSignal): Commands { return signal ? new Commands(this.resolved, this.environment, AbortSignal.any([this.signal, signal])) : this }
-  async run(program: string, args: string[], cwd?: string): Promise<string> {
+  async run(program: string, args: string[], cwd?: string, environment?: Record<string, string>): Promise<string> {
     try {
       const { stdout } = await exec(program, args, { cwd, signal: this.signal, timeout: TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024,
-        env: { ...process.env, ...this.environment, GH_PROMPT_DISABLED: '1', LARKSUITE_CLI_NO_UPDATE_NOTIFIER: '1', LARKSUITE_CLI_NO_SKILLS_NOTIFIER: '1' } })
+        env: { ...process.env, ...this.environment, ...environment, GH_PROMPT_DISABLED: '1', LARKSUITE_CLI_NO_UPDATE_NOTIFIER: '1', LARKSUITE_CLI_NO_SKILLS_NOTIFIER: '1' } })
       return stdout
     } catch (error) { throw commandError(error, program) }
   }
   /** Runs the agent's GitHub CLI and parses its JSON output; callers should prefer `api`, which is restricted to the configured repository and validates output. */
-  async gh<T>(args: string[]): Promise<T> { return JSON.parse(await this.run(this.deployment.github.cli, args)) as T }
+  async gh<T>(args: string[]): Promise<T> {
+    if (this.deployment.provider !== 'github') throw new Error('GitHub is not the selected repository host')
+    return JSON.parse(await this.run(this.deployment.account.cli, args)) as T
+  }
   /**
-   * Calls the GitHub API on a path within the configured repository, validating JSON output when a schema is provided
-   * or returning raw CLI output (such as raw files or `--include` headers) when omitted.
-   * @throws CliError with GitHub's HTTP status as `code` on failure.
+   * Calls the selected host's API within the configured repository/project, validating JSON output when a schema is provided.
+   * Without a schema it returns raw CLI output.
+   * @throws CliError with the host's HTTP status as `code` on failure.
    */
   async api<T>(schema: z.ZodType<T>, path: string, ...flags: string[]): Promise<T>
   async api(path: string, ...flags: string[]): Promise<string>
   async api<T>(schema: z.ZodType<T> | string, ...rest: string[]): Promise<T | string> {
-    if (typeof schema === 'string') return this.run(this.deployment.github.cli, ['api', this.path(schema), ...rest])
-    const [path = '', ...flags] = rest
-    return schema.parse(await this.gh(['api', this.path(path), ...flags]))
+    if (this.deployment.provider === 'github') {
+      if (typeof schema === 'string') return this.run(this.deployment.account.cli, ['api', this.path(schema), ...rest])
+      const [path = '', ...flags] = rest
+      return schema.parse(await this.gh(['api', this.path(path), ...flags]))
+    }
+    const path = typeof schema === 'string' ? schema : rest[0] ?? ''
+    const flags = typeof schema === 'string' ? rest : rest.slice(1)
+    const { account, origin, caFile } = this.deployment
+    const raw = await this.run(account.cli, ['api', this.path(path), ...flags, '--repo', this.deployment.webUrl],
+      undefined, gitlabEnvironment(origin, caFile))
+    return typeof schema === 'string' ? raw : schema.parse(JSON.parse(raw))
   }
-  /** Fetches all pages of a GitHub API list within the configured repository, skipping items that fail schema validation. */
+  /** Fetches a repository-scoped list, with bounded and advancing GitLab pages; invalid items count toward the caller's tally. */
   async pages<T>(item: z.ZodType<T>, path: string, tally?: Tally): Promise<T[]> {
-    const pages = z.array(z.array(z.unknown())).parse(await this.gh(['api', this.path(path), '--paginate', '--slurp']))
-    return validItems(item, pages.flat(), tally)
+    if (this.deployment.provider === 'github') {
+      const pages = z.array(z.array(z.unknown())).parse(await this.gh(['api', this.path(path), '--paginate', '--slurp']))
+      return validItems(item, pages.flat(), tally)
+    }
+    this.path(path)
+    const separator = path.indexOf('?')
+    const resource = separator < 0 ? path : path.slice(0, separator)
+    const query = new URLSearchParams(separator < 0 ? '' : path.slice(separator + 1))
+    query.set('per_page', '100')
+    const result: T[] = []
+    let previous: string | undefined
+    let bytes = 0
+    for (let page = 1; page <= 1000; page++) {
+      this.signal.throwIfAborted()
+      query.set('page', String(page))
+      const raw = await this.api(`${resource}?${query}`)
+      const rows = z.array(z.unknown()).parse(JSON.parse(raw))
+      bytes += Buffer.byteLength(raw)
+      if ((previous === raw && rows.length > 0) || bytes > 16 * 1024 * 1024) throw new CliError('GitLab pagination did not advance or exceeded its output limit')
+      result.push(...validItems(item, rows, tally))
+      if (rows.length < 100) return result
+      previous = raw
+    }
+    throw new CliError('GitLab pagination exceeded 1000 pages')
   }
   private path(path: string): string {
-    const outside = /^\/|^[a-z]+:|(^|\/)\.\.?(\/|\?|$)/i.test(path)
-    if (outside) throw new Error('GitHub calls are restricted to the configured repository')
-    return path ? `repos/${this.repository}/${path}` : `repos/${this.repository}`
+    let decoded: string
+    try { decoded = decodeURIComponent(path.split('?')[0] ?? '') } catch { decoded = '/' }
+    const file = /^repository\/files\/[^/?]+\/raw(?:\?|$)/.test(path)
+    const outside = /^\/|^[a-z]+:|(^|\/)\.\.?(\/|\?|$)/i.test(path) || path.includes('\\')
+      || (this.deployment.provider === 'gitlab' && (/^\/|(^|\/)\.\.?(\/|$)/.test(decoded) || /%5c/i.test(path.split('?')[0] ?? '')
+        || (!file && /%2f/i.test(path.split('?')[0] ?? ''))))
+    if (outside) throw new Error('API calls are restricted to the configured repository')
+    if (this.deployment.provider === 'github') return path ? `repos/${this.repository}/${path}` : `repos/${this.repository}`
+    const project = this.deployment.projectId
+    if (!project) throw new Error('GitLab project is not resolved')
+    return path ? `projects/${project}/${path}` : `projects/${project}`
   }
   /**
    * Runs the Feishu bot's `lark-cli` and returns the JSON `data` payload.

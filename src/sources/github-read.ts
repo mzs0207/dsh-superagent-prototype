@@ -44,17 +44,6 @@ export function ciFact(counts: { failed: number; running: number }): ThreadFact 
   return { label: 'CI', value: { zh: '通过', en: 'passed' } }
 }
 
-/** Reads a non-hidden file or directory listing from the repository's default branch via the GitHub API; hidden entries and `node_modules` are rejected. */
-export async function readRepositoryPath(commands: Commands, path: string, kind: 'file' | 'directory'): Promise<string> {
-  const parts = path.split('/').filter(part => part && part !== '.')
-  if (parts.some(part => part === '..' || part.startsWith('.') || part === 'node_modules')) throw new Error('Only non-hidden repository source paths are available')
-  const resource = `contents/${parts.map(encodeURIComponent).join('/')}`
-  if (kind === 'file') return commands.api(resource, '-H', 'Accept: application/vnd.github.raw')
-  // GitHub returns an entry array for a directory and a single object for a file.
-  const entries = await commands.api(z.union([z.array(z.looseObject({ name: z.string() })), z.looseObject({})]), resource)
-  if (!Array.isArray(entries)) throw new Error(`${path} is not a directory`)
-  return entries.map(entry => entry.name).filter(name => !name.startsWith('.') && name !== 'node_modules').sort().join('\n')
-}
 
 /** Reads check runs and commit statuses for a commit without emitting a trigger. */
 export async function pullChecks(commands: Commands, head: string, tally?: Tally): Promise<CiSnapshot> {
@@ -100,6 +89,7 @@ function threadMessages(thread: GithubComment[], id: (comment: GithubComment) =>
  * `{ id, from, at, text, reply_to?, path?, line?, url }` messages rather than raw GitHub API records.
  */
 export async function readGithub(commands: Commands, resource: string): Promise<unknown> {
+  if (commands.deployment.provider !== 'github') throw new Error('GitHub is not the selected repository provider')
   // A commit's CI, such as the default branch's, which no PR names.
   const commit = /^github\/commits\/([0-9a-f]{7,40})\/checks$/.exec(resource)
   if (commit) return pullChecks(commands, commit[1]!)

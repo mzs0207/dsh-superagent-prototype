@@ -94,6 +94,15 @@ export function ExecutionSettings() {
       <Fields disabled={draft.busy}>
         <div className="dt-form dt-block">
           <h2 className="dt-block-title">{t('term.executor')}<InfoTip text={t('executorIntro')} /></h2>
+          <Field label={t('repositoryProvider')} hint={t('repositoryProviderHint')}>
+            <select className="dt-select" aria-label={t('repositoryProvider')} value={value.repositoryProvider}
+              onChange={event => {
+                const repositoryProvider = event.target.value
+                if (repositoryProvider === 'github' || repositoryProvider === 'gitlab') edit({ repositoryProvider })
+              }}>
+              <option value="github">GitHub</option><option value="gitlab">GitLab</option>
+            </select>
+          </Field>
           <Section title={t('executorModel')} hint={t('executorModelHint')}><ModelField id="dt-worker-model" value={value.model}
             onChange={model => edit({ model })} /></Section>
           <Field label={t('maxWorkers')} hint={t('maxWorkersHint')}>

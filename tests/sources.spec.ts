@@ -6,7 +6,8 @@ import { KV } from '../src/kv.ts'
 import { apply as applyFeishu, pollThreads as pollFeishuThreads } from '../src/sources/feishu.ts'
 import { runFeishu } from '../src/sources/feishu-loops.ts'
 import { commentTrigger, githubAddress, githubChannel, issueTrigger, type GithubComment, type GithubIssue } from '../src/sources/github-trigger.ts'
-import { claimPull, observePull, pullEndNotices, pullOf, ticketBranch, type Pull } from '../src/sources/github-pull.ts'
+import { claimPull, observePull, type Pull } from '../src/sources/github-pull.ts'
+import { changeEndNotices, changeOf, ticketBranch } from '../src/sources/change.ts'
 import { ciCounts, ciFact, ciSummary } from '../src/sources/github-read.ts'
 import { apply as applyGithub, githubKind, pollFailure, pollRound } from '../src/sources/github.ts'
 import { pollThreads as pollGithubThreads } from '../src/sources/github.ts'
@@ -409,16 +410,16 @@ describe('github source', () => {
     const agentsPull = (number: number): Pull => ({ ...openPull(number), user: { login: 'agent-bot' }, head: { sha: 'abc',
       ref: 'agent/one', repo: { full_name: 'acme/widgets' } } })
     await observePull(h, agentsPull(9))
-    expect(pullOf(h.store.tickets.get('t1')!)).toBe(9)
+    expect(changeOf(h.store.tickets.get('t1')!)).toBe(9)
     expect(h.store.threads.get('github:9')?.subscriptions).toEqual(['t1'])
     // A ticket that follows a PR moves to another only by its Executor's report.
     await observePull(h, agentsPull(10))
-    expect(pullOf(h.store.tickets.get('t1')!)).toBe(9)
+    expect(changeOf(h.store.tickets.get('t1')!)).toBe(9)
     expect(await observePull(h, endedPull(9, '2026-09-02T00:00:00Z'))).toBe(true)
     expect(h.store.tickets.get('t1')).toMatchObject({ ended: { by: 'executor', outcome: 'merged', at: '2026-09-02T00:00:00.000Z' } })
     expect(h.store.threads.get('github:9')?.subscriptions).toEqual(['t1'])
     // The notice its end gives follows the language of the source request.
-    const notices = pullEndNotices(h.store.tickets.get('t1')!, request.text, 'acme/widgets')
+    const notices = changeEndNotices(h.store.tickets.get('t1')!, request.text, h.deployment)
     expect(notices).toEqual([expect.objectContaining({ kind: 'notice', channel: expect.objectContaining({ source: 'feishu' }), text: expect.stringContaining('已合并') })])
     expect(h.executor.stop).toHaveBeenCalledOnce()
     // Resumed after the merge, the ticket works on: a later look at the merged PR reports nothing again.
@@ -430,7 +431,7 @@ describe('github source', () => {
     expect(h.store.tickets.get('t1')).toMatchObject({ ended: { outcome: 'merged' } })
     expect(Date.parse(h.store.tickets.get('t1')!.ended!.at)).toBeGreaterThan(Date.parse('2026-09-03T00:00:00Z'))
     // Its notice has the id of the first one, so it goes out once.
-    expect(pullEndNotices(h.store.tickets.get('t1')!, request.text, 'acme/widgets').map(notice => notice.id)).toEqual(notices.map(notice => notice.id))
+    expect(changeEndNotices(h.store.tickets.get('t1')!, request.text, h.deployment).map(notice => notice.id)).toEqual(notices.map(notice => notice.id))
     h.store.close()
   })
   it('keeps a ticket working on its other open PR when one of its PRs merges', async () => {
@@ -442,7 +443,7 @@ describe('github source', () => {
     expect(h.store.tickets.get('t3')).toMatchObject({ follows: [{ thread: 'github:21', own: true },
       { thread: 'github:22', own: true, closed: { at: '2026-09-02T00:00:00.000Z', outcome: 'merged' } }] })
     expect(h.store.tickets.get('t3')).not.toHaveProperty('ended')
-    expect(pullOf(h.store.tickets.get('t3')!)).toBe(21)
+    expect(changeOf(h.store.tickets.get('t3')!)).toBe(21)
     expect(h.executor.stop).not.toHaveBeenCalled()
     expect(await observePull(h, endedPull(21, '2026-09-03T00:00:00Z'))).toBe(true)
     expect(h.store.tickets.get('t3')).toMatchObject({ ended: { outcome: 'merged', at: '2026-09-03T00:00:00.000Z' } })
@@ -473,7 +474,7 @@ describe('github source', () => {
     h.store.triggers.save(request)
     h.store.tickets.save({ id: 't2', title: 'two', decisionId: 'd2', mandate: { strength: 'explicit', policyVersion: '', basis: { via: 'listed' }, actor: { source: 'feishu', id: MEMBER }, scope: '' }, channels: [{ source: 'feishu', thread: 'feishu:oc_1', address: { chatId: 'oc_1', messageId: 'om_2' } }], assignments: [], inputs: [], undelivered: [], createdAt: '', updatedAt: '', ...pulled(12), origin: { triggerId: request.id, triggerIds: [request.id] } })
     expect(await observePull(h, endedPull(12, '2026-09-02T00:00:00Z', false))).toBe(true)
-    expect(pullEndNotices(h.store.tickets.get('t2')!, request.text, 'acme/widgets'))
+    expect(changeEndNotices(h.store.tickets.get('t2')!, request.text, h.deployment))
       .toEqual([expect.objectContaining({ text: '[PR #12](https://github.com/acme/widgets/pull/12) was closed without merging.' })])
     h.store.close()
   })
@@ -955,12 +956,12 @@ describe('github source', () => {
     expect(claimPull(h, 't1', agents(41, 'agent/fix-1'))).toBe('PR already belongs to another active ticket')
     // A PR that is not open is not bound, and that is no refusal.
     expect(claimPull(h, 't1', { ...agents(42, 'agent/fix-1'), state: 'closed' })).toBeUndefined()
-    expect(pullOf(h.store.tickets.get('t1')!)).toBeUndefined()
+    expect(changeOf(h.store.tickets.get('t1')!)).toBeUndefined()
     expect(claimPull(h, 't1', openPull(30))).toBeUndefined()
     expect(h.store.tickets.get('t1')!.follows).toEqual([{ thread: 'github:30', own: false }])
     expect(claimPull(h, 't1', agents(43, 'agent/fix-1'))).toBeUndefined()
     expect(h.store.tickets.get('t1')).toMatchObject({ follows: [{ thread: 'github:30', own: false }, { thread: 'github:43', own: true }], channels: [] })
-    expect(pullOf(h.store.tickets.get('t1')!)).toBe(43)
+    expect(changeOf(h.store.tickets.get('t1')!)).toBe(43)
     expect(h.store.threads.get('github:43')).toMatchObject({ subscriptions: ['t1'], meta: { isPr: true, prAuthor: 'agent-bot' } })
     // The PR the ticket started from is not one it opened: when its own PR merges, the ticket ends instead of following it.
     expect(await observePull(h, endedPull(43, '2026-09-02T00:00:00Z'))).toBe(true)
@@ -1043,7 +1044,7 @@ describe('feishu event consumer', () => {
    * A bot CLI whose `event consume` behaves as `mode` says: `never` gets ready, `warn` warns once ready, `ready` stays up,
    * and `flaky` exits after its first ready. It records each run and the PID of the latest.
    */
-  function cli(mode: 'never' | 'warn' | 'ready' | 'flaky' | 'events' | 'late'): string {
+  function cli(mode: 'never' | 'warn' | 'ready' | 'flaky' | 'events' | 'late' | 'events-before-ready'): string {
     const path = join(dir, 'lark-bot')
     writeFileSync(path, `#!/bin/sh
   [ "$1" = event ] || { echo '{"ok":true,"data":{}}'; exit 0; }
@@ -1055,6 +1056,7 @@ describe('feishu event consumer', () => {
     flaky) echo '[event] ready' >&2; [ "$n" -gt 1 ] && exec sleep 60; exit 1 ;;
     events) echo '[event] ready' >&2; cat '${dir}/events'; touch '${dir}/printed'; exec sleep 60 ;;
     late) echo '[event] ready' >&2; sleep 1; cat '${dir}/events'; touch '${dir}/printed'; exec sleep 60 ;;
+    events-before-ready) cat '${dir}/events'; while [ ! -f '${dir}/allow-ready' ]; do sleep 0.01; done; echo '[event] ready' >&2; exec sleep 60 ;;
   esac
   `, { mode: 0o755 })
     return path
@@ -1095,6 +1097,25 @@ describe('feishu event consumer', () => {
     expect(['om_1', 'om_2'].map(id => store.triggers.get(feishuTriggerId(id))?.meta.direct)).toEqual([false, true])
     expect(store.get(KV.feishu.chats)).toEqual({ oc_group: false, oc_dm: true })
     expect(health.feishu).toMatchObject({ state: 'error', detail: expect.stringContaining('JSON') })
+    controller.abort(); await running; store.close()
+  }, 20_000)
+  it('keeps a stream parsing error when stderr readiness arrives after stdout events', async () => {
+    writeFileSync(join(dir, 'events'), ['not json', event('om_after_error', 'oc_group', 'group')].join('\n') + '\n')
+    const { ctx, health, store } = consumerSource(cli('events-before-ready'))
+    const report = ctx.report
+    let observeReady = false
+    const { promise: reported, resolve: observed } = Promise.withResolvers<void>()
+    ctx.report = (entry, value) => {
+      report(entry, value)
+      if (observeReady && entry === 'feishu') observed()
+    }
+    running = runFeishu(ctx, controller.signal)
+    await vi.waitFor(() => expect(store.triggers.get(feishuTriggerId('om_after_error'))).toBeDefined(), until)
+    expect(health.feishu?.state).toBe('error')
+    observeReady = true
+    writeFileSync(join(dir, 'allow-ready'), '')
+    await reported
+    expect(health.feishu?.state).toBe('error')
     controller.abort(); await running; store.close()
   }, 20_000)
   it('drops the events it reads once the Source is off', async () => {

@@ -73,9 +73,9 @@ export const webhookKind: SourceKind<WebhookConfig> = {
 ```
 
 - `kind` is the stable Source id. It appears in Trigger `source`, Thread-key prefixes, the `source:webhook` settings block and the Source Policy.
-- `schema` validates stored configuration and supplies defaults. Before an operator saves an instance, the registry creates an enabled instance from those defaults. Make defaults receive nothing; this example defaults to no conversations.
+- `schema` validates stored configuration and supplies defaults. `defaultEnabled: false` requires explicit operator enablement for a new kind, as GitLab does; omitted defaults to the existing enabled behavior. `repositoryProvider: 'github' | 'gitlab'` additionally gates hosting Sources to the execution platform. Defaults must receive nothing.
 - `fields` generates the Source settings form without custom panel code. A `rows` field edits entries keyed by its first column; `advanced` hides less common settings. Implement `refreshLabels` if the Source can resolve ids to display names. Save those names under `KV.sources.labels(kind)`. Columns with `choose` and `refresh` can then offer them.
-- Optional `facts(deployment)` displays values derived by setup, such as the account behind a CLI. Setup currently checks only GitHub and Feishu fields listed in `SETUP_FIELDS`, so this example supplies no facts.
+- Optional `facts(deployment)` displays values derived by setup. `SETUP_FIELDS` checks the selected GitHub/GitLab account plus optional Feishu. `Deployment` has provider-neutral `account`, `origin`, `repository`, `namespace`, `webUrl` and `cloneUrl`, with GitLab's resolved project ID and default branch. Use native API adapters, not simulated GitHub responses. Optional `find(query, config)` receives validated Source configuration so self-managed URLs and nested project paths can be matched safely.
 - `health` declares the Source's health entries, initially `starting`. Registration claims each name and refuses collisions with entries such as `runtime`, `reply`, `worker` or effect kinds. Use the kind's name and reserve `sync:<id>` for Policy syncs. An `error` makes the status script exit 2 and the hourly check notify the operator, so report it only when human action may be needed.
 
 ### 3. Translate a message into a Trigger

@@ -6,6 +6,11 @@ Refresh the comparison when later UI changes make it stale.
 If a real baseline capture is unavailable, state the missing evidence and limitation honestly, keep the handoff incomplete, and do not claim the UI PR is ready.
 Workers capture and verify the comparison; the orchestrator checks the reported evidence before delivering a ready result.
 
+For GitLab ($DSH_SUPERAGENT_REPOSITORY_PROVIDER=gitlab), use glab and $DSH_SUPERAGENT_REPOSITORY_URL, never mirror company code to GitHub.
+Use the actual target branch; immediately report a new/adopted MR IID with pr_number.
+People merge every GitLab MR: no self-approval or auto-merge. Preserve private source audiences.
+The remaining merge, credit-rewriting and duplicate-PR instructions apply only to GitHub.
+
 Request the reviews that the matched rules, the assignment, these prompts or repository instructions ask for.
 Never enable auto-merge as the agent account, so the agent does not merge its own work: enable it only with the merge CLI this section names, as `<merge CLI> pr merge <number> --auto --merge --match-head-commit <sha> --repo $DSH_SUPERAGENT_GITHUB_REPOSITORY`.
 When this section names no merge CLI, a person merges every PR.

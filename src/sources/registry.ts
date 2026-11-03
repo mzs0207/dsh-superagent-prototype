@@ -43,13 +43,13 @@ export class SourceRegistry implements SourceScope {
   kind(id: string): SourceKind | undefined { return this.kinds.get(id) }
   /** Every registered kind's instance ordered by ID, followed by stored instances whose kind is not installed (with their config kept as stored). */
   instances(settings = this.settings()): (SourceInstance & { installed: boolean })[] {
-    const installed = [...this.kinds.values()].sort((a, b) => a.kind.localeCompare(b.kind)).map(kind => ({ ...this.resolve(kind, settings.sources[kind.kind]), installed: true }))
+    const installed = [...this.kinds.values()].sort((a, b) => a.kind.localeCompare(b.kind)).map(kind => ({ ...this.resolve(kind, settings.sources[kind.kind], settings), installed: true }))
     const orphaned = Object.entries(settings.sources).filter(([id]) => !this.kinds.has(id)).map(([id, stored]) => ({ id, kind: id, enabled: stored.enabled, config: stored.config, installed: false }))
     return [...installed, ...orphaned]
   }
   instance<C extends Record<string, unknown>>(id: string, settings = this.settings()): SourceInstance<C> | undefined {
     const kind = this.kinds.get(id)
-    return kind ? this.resolve(kind, settings.sources[id]) as SourceInstance<C> : undefined
+    return kind ? this.resolve(kind, settings.sources[id], settings) as SourceInstance<C> : undefined
   }
   validate(id: string, value: { enabled: boolean; config: unknown }): { enabled: boolean; config: Record<string, unknown> } {
     const kind = this.kinds.get(id)
@@ -75,7 +75,7 @@ export class SourceRegistry implements SourceScope {
   channelAllowed(channel: { source: string; address: Record<string, string> }, settings = this.settings()): boolean {
     const kind = this.kinds.get(channel.source)
     if (!kind) return false
-    const instance = this.resolve(kind, settings.sources[channel.source])
+    const instance = this.resolve(kind, settings.sources[channel.source], settings)
     return instance.enabled && (kind.channel?.allowed?.(channel.address, instance.config) ?? true)
   }
   /** Environment variable declarations for every installed kind, whether enabled or disabled. */
@@ -84,7 +84,7 @@ export class SourceRegistry implements SourceScope {
   }
   environments(settings = this.settings()) {
     return [...this.kinds.values()].sort((a, b) => a.kind.localeCompare(b.kind)).flatMap(kind => {
-      const instance = this.resolve(kind, settings.sources[kind.kind])
+      const instance = this.resolve(kind, settings.sources[kind.kind], settings)
       return kind.environment && instance.enabled ? [{ kind, environment: kind.environment, config: instance.config }] : []
     })
   }
@@ -102,7 +102,9 @@ export class SourceRegistry implements SourceScope {
     return link ?? { url: '', label: { zh: channel.source, en: channel.source } }
   }
   find(query: string): { threads: string[]; terms: string[] } {
-    const found = [...this.kinds.values()].flatMap(kind => kind.find ? [kind.find(query)] : [])
+    const settings = this.settings()
+    const found = [...this.kinds.values()].filter(kind => !kind.repositoryProvider || kind.repositoryProvider === settings.executor.repositoryProvider)
+      .flatMap(kind => kind.find ? [kind.find(query, this.resolve(kind, settings.sources[kind.kind], settings).config)] : [])
     return { threads: [...new Set(found.flatMap(item => item.threads))], terms: [...new Set(found.flatMap(item => item.terms))] }
   }
   repliesTo(trigger: Trigger): string | undefined { return this.kinds.get(trigger.source)?.repliesTo?.(trigger) }
@@ -110,7 +112,7 @@ export class SourceRegistry implements SourceScope {
     const kind = this.kinds.get(trigger.source)
     const context = kind?.threadContext
     if (!kind || !context) return undefined
-    const { config } = this.resolve(kind, settings.sources[kind.kind])
+    const { config } = this.resolve(kind, settings.sources[kind.kind], settings)
     return {
       messageId: context.messageId(trigger),
       read: (commands, part, cursor) => context.read(commands, trigger, part, cursor, config),
@@ -126,13 +128,15 @@ export class SourceRegistry implements SourceScope {
     const stored = settings.sources[input.source]
     // Without its kind plugin the stored scope cannot be evaluated, so a configured Source whose plugin is missing listens to nothing.
     if (!kind) return stored ? { listened: false, reason: 'source_not_installed' } : { listened: true, observed: false }
-    const instance = this.resolve(kind, stored)
+    const instance = this.resolve(kind, stored, settings)
     if (!instance.enabled) return { listened: false, reason: 'source_disabled' }
     return kind.scope ? kind.scope({ meta: input.meta }, instance.config) : { listened: true, observed: false }
   }
   /** Falls back to schema defaults and disables the instance when stored configuration fails validation. */
-  private resolve(kind: SourceKind, stored: { enabled: boolean; config: Record<string, unknown> } | undefined): SourceInstance {
+  private resolve(kind: SourceKind, stored: { enabled: boolean; config: Record<string, unknown> } | undefined, settings: Settings): SourceInstance {
     const parsed = kind.schema.safeParse(stored?.config ?? {})
-    return { id: kind.kind, kind: kind.kind, enabled: parsed.success && (stored?.enabled ?? true), config: parsed.success ? parsed.data : kind.schema.parse({}) }
+    return { id: kind.kind, kind: kind.kind, enabled: parsed.success && (stored?.enabled ?? kind.defaultEnabled ?? true)
+      && (!kind.repositoryProvider || kind.repositoryProvider === settings.executor.repositoryProvider),
+      config: parsed.success ? parsed.data : kind.schema.parse({}) }
   }
 }

@@ -48,6 +48,12 @@ export const KV = {
     stream: family<{ since: string; started: Record<string, string>; etag?: string }, [stream: string]>('github-stream:'),
     branchCi: record<{ branch?: string; failures?: string[]; revision: number }>('github-branch-ci'),
     ci: family<{ fingerprint: string; revision: number }, [number: number]>('github-ci:') },
+  /** GitLab Source state is isolated by configured host/project namespace; Issue and MR IIDs never share a key. */
+  gitlab: { cursor: family<string, [namespace: string]>('gitlab-cursor:'),
+    observed: family<Record<string, string>, [namespace: string]>('gitlab-observed:'),
+    thread: family<string, [thread: string]>('gitlab-thread:'),
+    branch: family<string, [namespace: string]>('gitlab-branch:'),
+    ci: family<{ fingerprint?: string; revision: number }, [namespace: string, target: string]>('gitlab-ci:') },
   /**
    * Feishu Source: known chats (`true` for direct messages); per-chat history cursor and active topics mapped from topic ID
    * to last-seen timestamp; and per-polled-thread seen message IDs and initialization flag.
