@@ -18,7 +18,7 @@ beforeEach(() => {
   store = new Store(join(directory, 'orchestrator.sqlite'))
 })
 afterEach(() => { store.close(); rmSync(directory, { recursive: true, force: true }) })
-const sources = new SourceRegistry(() => SettingsSchema.parse({}))
+const sources = new SourceRegistry(() => SettingsSchema.parse({ executor: { repositoryProvider: 'github' } }))
 sources.register(githubKind)
 const host = () => ({ store, sources, links: (channel: ChannelRef) => githubLink(channel.address, {}) })
 const engine = () => new Engine({ repo: store, scope: sources, policy: () => settingsPolicy(SettingsSchema.parse({}), sources),

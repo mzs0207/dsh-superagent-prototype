@@ -50,7 +50,7 @@ it('names the Thread of each dropped message: the one of the Trigger its Channel
 })
 
 function views() {
-  store.saveSettings(SettingsSchema.parse({ policy: { sources: { feishu: { allowed: [{ id: 'ou_alice', name: 'Alice' }] },
+  store.saveSettings(SettingsSchema.parse({ executor: { repositoryProvider: 'github' }, policy: { sources: { feishu: { allowed: [{ id: 'ou_alice', name: 'Alice' }] },
     github: { allowed: [{ id: 'alice' }] } },
     rules: [{ id: 'copy', name: 'Copy fixes', enabled: true, instruction: 'Fix copy' }] } }))
   const sources = new SourceRegistry(() => store.settings())

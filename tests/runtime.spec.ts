@@ -816,6 +816,8 @@ it('waits for setup without the agent\'s GitHub CLI: the panel works, and nothin
   await runTool(sessionId, 'orchestrator_report', { state: 'failed', summary: 'crashed' })
   expect(() => runtime.checkSetup()).toThrow('Setup is complete')
   controller.create.mockClear(); deliveries.mockClear()
+  const settings = runtime.store.settings()
+  runtime.store.saveSettings({ ...settings, executor: { ...settings.executor, repositoryProvider: 'github' } })
   const next = await restart({}, { github: { cli: '' } })
   await next.ready
   expect(next.configured()).toBe(false)
@@ -843,6 +845,8 @@ it('waits for setup without the agent\'s GitHub CLI: the panel works, and nothin
 
 it('reports each setup problem where the operator fixes it, and checks the agent CLI the way worker shells run it', async () => {
   const needs = async (place: string, code: string, values: Record<string, string>, accounts: Accounts = {}) => {
+    const settings = runtime.store.settings()
+    runtime.store.saveSettings({ ...settings, executor: { ...settings.executor, repositoryProvider: 'github' } })
     const next = await restart({}, accounts)
     await next.ready
     expect(next.setupProblem).toMatchObject({ place, code, values })
@@ -893,6 +897,18 @@ it('checks only the account a Source save changes, so a problem setup has elsewh
   const value = github.value as { enabled: boolean; config: Record<string, unknown> }
   expect(await next.settings.save('source:github', { ...value, config: { ...value.config, cli: OTHER() } }, github.revision, 'panel'))
     .toMatchObject({ saved: true, restarting: true })
+})
+
+it('saves Automatic before a repository is configured without enabling sources or resuming processing', async () => {
+  const before = runtime.store.settings()
+  runtime.store.saveSettings({ ...before, paused: true,
+    executor: { ...before.executor, repositoryProvider: 'github' },
+    sources: { ...before.sources, github: { enabled: false, config: {} } } })
+  const result = await runtime.settings.save('executor', { ...runtime.store.settings().executor, repositoryProvider: 'auto' },
+    runtime.store.blockRevision('executor'), 'panel')
+  expect(result).toMatchObject({ saved: true, restarting: true })
+  expect(runtime.store.settings()).toMatchObject({ paused: true, executor: { repositoryProvider: 'auto' },
+    sources: { github: { enabled: false, config: {} } } })
 })
 
 it('lets only the panel change the execution environment, since it decides what runs as a shell command and which CLIs workers reach', async () => {

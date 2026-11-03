@@ -2,7 +2,7 @@
 import type { ChannelRef, OutboundMessage, ScopeResult, SourceScope, Trigger } from '../core/index.ts'
 import type { Commands } from '../infra/commands.ts'
 import { HealthBoard, type HealthEntry } from '../infra/health.ts'
-import { AdmissionTableSchema, type Settings } from '../policy.ts'
+import { AdmissionTableSchema, selectRepositoryProvider, type Settings } from '../policy.ts'
 import type { ChannelLink, ChannelLinks, SourceInstance, SourceKind, TriggerContext, VariableSpec } from './kind.ts'
 
 
@@ -103,7 +103,8 @@ export class SourceRegistry implements SourceScope {
   }
   find(query: string): { threads: string[]; terms: string[] } {
     const settings = this.settings()
-    const found = [...this.kinds.values()].filter(kind => !kind.repositoryProvider || kind.repositoryProvider === settings.executor.repositoryProvider)
+    const { provider } = selectRepositoryProvider(settings)
+    const found = [...this.kinds.values()].filter(kind => !kind.repositoryProvider || kind.repositoryProvider === provider)
       .flatMap(kind => kind.find ? [kind.find(query, this.resolve(kind, settings.sources[kind.kind], settings).config)] : [])
     return { threads: [...new Set(found.flatMap(item => item.threads))], terms: [...new Set(found.flatMap(item => item.terms))] }
   }
@@ -136,7 +137,7 @@ export class SourceRegistry implements SourceScope {
   private resolve(kind: SourceKind, stored: { enabled: boolean; config: Record<string, unknown> } | undefined, settings: Settings): SourceInstance {
     const parsed = kind.schema.safeParse(stored?.config ?? {})
     return { id: kind.kind, kind: kind.kind, enabled: parsed.success && (stored?.enabled ?? kind.defaultEnabled ?? true)
-      && (!kind.repositoryProvider || kind.repositoryProvider === settings.executor.repositoryProvider),
+      && (!kind.repositoryProvider || kind.repositoryProvider === selectRepositoryProvider(settings).provider),
       config: parsed.success ? parsed.data : kind.schema.parse({}) }
   }
 }

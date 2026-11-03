@@ -14,6 +14,7 @@ const feishuSource = (config: { chats: { chatId: string; listen: 'mentions' | 'a
 const base = SettingsSchema.parse({
   policy: { sources: { feishu: { allowed: [{ id: MEMBER, name: 'Alice' }], syncChat: CHAT }, github: { allowed: [{ id: 'Alice' }] } } },
   eval: { mode: 'auto' },
+  executor: { repositoryProvider: 'github' },
   sources: { feishu: feishuSource({ chats: [{ chatId: CHAT, listen: 'mentions' }, { chatId: OBSERVED, listen: 'all' }], directMessages: true }) },
 })
 function setup(settings: Settings = base) {
@@ -254,7 +255,7 @@ describe('settings migration', () => {
       sources: { feishu: feishuSource({ chats: [{ chatId: CHAT, listen: 'mentions' }, { chatId: OBSERVED, listen: 'all' }], directMessages: false }), github: { enabled: true, config: { pollSeconds: 120 } } },
       policy: { rules: [], sources: { feishu: { allowed: [{ id: MEMBER, name: 'A' }], admission: {} }, github: { allowed: [{ id: 'a' }], admission: {} } } },
       eval: { mode: 'auto', timeoutSeconds: 90, model: { provider: 'p', model: 'm' } },
-      executor: { repositoryProvider: 'github', model: null, maxWorkers: 5, directory: '', prepare: '', blockedCommands: [] },
+      executor: { repositoryProvider: 'auto', model: null, maxWorkers: 5, directory: '', prepare: '', blockedCommands: [] },
     })
     expect(migrateSettings(migrated)).toEqual(migrated)
   })
@@ -410,6 +411,7 @@ describe('policy effects', () => {
 describe('bots and events without a sender', () => {
   const observing = (config: Record<string, unknown>, part: Record<string, unknown> = {},
     mode: 'auto' | 'off' = 'auto') => SettingsSchema.parse({
+    executor: { repositoryProvider: 'github' },
     policy: { sources: { github: { allowed: [{ id: 'Alice' }], bots: [{ id: 'dependabot[bot]' }], ...part } } }, eval: { mode },
     sources: { github: { enabled: true, config } } })
   const comment: Trigger = { id: 'b', source: 'github', threads: [{ source: 'github', id: '1' }],

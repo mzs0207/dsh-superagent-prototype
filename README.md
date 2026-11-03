@@ -6,6 +6,8 @@
 
 dsh-superagent is a proactive coding agent for one GitHub or self-managed GitLab repository, packaged as a bundle for [DeepSeek Harness](https://www.deepseek.com/en/harness/). It listens to the selected hosting Source and, optionally, Feishu. When someone allowed asks for work, it opens a work item, works in its own agent session and directory, and answers in the original conversation with a PR or MR. A web panel shows what needs a person. GitLab uses native `glab` and project polling, including intranet HTTP(S), nested namespaces and custom ports; no GitHub mirror or public webhook is required. See [deployment](docs/006-deployment.md#self-managed-gitlab).
 
+Repository hosting defaults to **Automatic**: configure GitHub **or** GitLab, not both. When exactly one host has its repository and agent CLI configured (plus GitLab's host URL), setup uses it. If both are configured, choose one explicitly under **Settings → Execution**. Authentication failure never silently changes the target repository.
+
 It is also a way of working with an agent: **take as little human attention as possible, and give as much value as possible.** An agent that can act for a whole team can also waste a whole team's attention, so it acts only when asked or when a rule the team wrote allows it, and speaks only when someone must act or can use a result. [docs/000-philosophy.md](docs/000-philosophy.md) explains the principle and what it asks of the operator.
 
 ## Setup

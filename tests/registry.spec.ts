@@ -21,7 +21,7 @@ const probe: SourceKind<{ interval: number }> = {
 
 describe('Source registry', () => {
   it('lists every installed kind with defaults, in id order, followed by stored instances whose kind is not installed', () => {
-    const settings = SettingsSchema.parse({ sources: { probe: { enabled: false, config: { interval: 9 } }, retired: { enabled: true, config: { x: 1 } } } })
+    const settings = SettingsSchema.parse({ executor: { repositoryProvider: 'github' }, sources: { probe: { enabled: false, config: { interval: 9 } }, retired: { enabled: true, config: { x: 1 } } } })
     const sources = new SourceRegistry(() => settings)
     sources.register(probe); sources.register(githubKind)
     expect(sources.instances()).toEqual([
@@ -108,7 +108,7 @@ describe('Source registry', () => {
     expect(sources.repliesTo({ ...reply, source: 'github' })).toBeUndefined()
   })
   it('finds what a search query names in each kind\'s terms', () => {
-    const sources = new SourceRegistry(() => SettingsSchema.parse({}))
+    const sources = new SourceRegistry(() => SettingsSchema.parse({ executor: { repositoryProvider: 'github' } }))
     sources.register(feishuKind); sources.register(githubKind)
     expect(sources.find('#12')).toEqual({ threads: ['github:12'], terms: [] })
     expect(sources.find('https://github.com/acme/widgets/pull/7#issuecomment-3')).toEqual({ threads: ['github:7'], terms: [] })
@@ -135,7 +135,7 @@ describe('Source registry', () => {
     expect(sources.policyPart('probe')).toBeUndefined()
   })
   it('allows a reply only on a Channel whose Source still listens to its chat', () => {
-    const settings = SettingsSchema.parse({ sources: { feishu: { enabled: true, config: { chats: [{ chatId: 'oc_team', listen: 'mentions' }], directMessages: false } } } })
+    const settings = SettingsSchema.parse({ executor: { repositoryProvider: 'github' }, sources: { feishu: { enabled: true, config: { chats: [{ chatId: 'oc_team', listen: 'mentions' }], directMessages: false } } } })
     const sources = new SourceRegistry(() => settings)
     expect(sources.channelAllowed({ source: 'feishu', address: { chatId: 'oc_team' } })).toBe(false)
     sources.register(feishuKind); sources.register(githubKind)

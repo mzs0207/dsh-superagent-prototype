@@ -27,7 +27,7 @@ import { join } from 'node:path'
 const MEMBER = 'ou_alice'
 function host(overrides: Partial<SourceContextDeps> = {}) {
   const store = new Store(join(mkdtempSync(join(tmpdir(), 'sources-')), 'db.sqlite'))
-  const settings = SettingsSchema.parse({ policy: { sources: { feishu: { allowed: [{ id: 'ou_alice', name: 'Alice' }], syncChat: 'oc_team' }, github: { allowed: [{ id: 'alice' }] } } }, eval: { mode: 'auto' }, sources: { feishu: { enabled: true, config: { chats: [{ chatId: 'oc_team', listen: 'mentions' }, { chatId: 'oc_observed', listen: 'all' }], directMessages: true } } } })
+  const settings = SettingsSchema.parse({ executor: { repositoryProvider: 'github' }, policy: { sources: { feishu: { allowed: [{ id: 'ou_alice', name: 'Alice' }], syncChat: 'oc_team' }, github: { allowed: [{ id: 'alice' }] } } }, eval: { mode: 'auto' }, sources: { feishu: { enabled: true, config: { chats: [{ chatId: 'oc_team', listen: 'mentions' }, { chatId: 'oc_observed', listen: 'all' }], directMessages: true } } } })
   store.saveSettings(settings)
   const board = new HealthBoard()
   const sources = new SourceRegistry(() => store.settings(), board)
@@ -766,7 +766,7 @@ describe('github source', () => {
       const start = async (overrides: Partial<SourceContextDeps>,
         github: { enabled: boolean; config: Record<string, unknown> } = { enabled: true, config: {} }) => {
         const board = new HealthBoard()
-        const settings = SettingsSchema.parse({ sources: { github } })
+        const settings = SettingsSchema.parse({ executor: { repositoryProvider: 'github' }, sources: { github } })
         const sources = new SourceRegistry(() => settings, board)
         healthOf.set(sources, board)
         const value = host({ sources, ...overrides })

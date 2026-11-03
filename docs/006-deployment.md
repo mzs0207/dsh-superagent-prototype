@@ -54,17 +54,27 @@ Use a dedicated bot/service account with Developer or higher project access and 
 
 Create an isolated CLI wrapper; do not copy your personal desktop credentials into it:
 
-```sh
+```bash
 mkdir -p ~/.local/bin
 cat > ~/.local/bin/glab-agent <<'EOF'
 #!/bin/sh
-GLAB_CONFIG_DIR="$HOME/.config/glab-superagent" exec "$HOME/.local/bin/glab" "$@"
+export GLAB_CONFIG_DIR="$HOME/.config/glab-superagent"
+export GLAB_SEND_TELEMETRY=false
+export GLAB_CHECK_UPDATE=false
+exec "$HOME/.local/bin/glab" "$@"
 EOF
 chmod +x ~/.local/bin/glab-agent
-glab-agent auth login --hostname gitlab.internal:8080 --api-protocol http --git-protocol http
+glab-agent config set telemetry false --global
+glab-agent config set check_update false --global
+read -r -s -p 'GitLab token: ' glab_token
+printf '\n'
+printf '%s\n' "$glab_token" | glab-agent auth login --hostname gitlab.internal:8080 --api-protocol http --git-protocol http --stdin
+unset glab_token
 glab-agent api user --repo http://gitlab.internal:8080/group/subgroup/project
 glab-agent api 'projects/group%2Fsubgroup%2Fproject' --repo http://gitlab.internal:8080/group/subgroup/project
 ```
+
+Protocol flags require non-interactive login: use `--stdin` as above, not an interactive command with only `--hostname`. Keep the token out of argv and shell history. These settings are isolated by the wrapper; they do not change your other CLI accounts.
 
 The login hostname has no scheme; API calls use the full project URL because `glab 1.82 api --hostname` rejects custom ports. Enter the token privately, not in chat, command arguments or Source fields. HTTP sends credentials without encryption: use it only on a trusted intranet; prefer HTTPS with the organization's CA. For HTTPS use `https` for both protocols and set a readable absolute CA PEM path; never use insecure TLS flags.
 
@@ -87,7 +97,7 @@ In **Settings → Sources → GitLab**, configure:
 }
 ```
 
-Then set **Execution → Repository hosting → GitLab** (`executor.repositoryProvider: "gitlab"`), configure `policy.sources.gitlab.allowed` with usernames, and use the generic checkout command below. Platform/account changes recheck setup and restart; reread API revisions after each restart. Leave processing paused until activation is authorized. The GitLab Source starts off; enabling it is a separate, consequential action because eligible requests may cause comments, pushes and MRs.
+Leave **Execution → Repository hosting** on **Automatic** (`executor.repositoryProvider: "auto"`) when GitLab is the only configured code host, or explicitly choose GitLab. Configure `policy.sources.gitlab.allowed`, use the generic checkout command below, and keep processing paused until activation is authorized. The GitLab Source starts off; enabling it separately may cause eligible requests to create comments, pushes and MRs.
 Finish or stop existing Tickets before changing the business host/project; use a fresh state directory for another deployment. A platform switch does not migrate old worktrees or reinterpret old requests.
 
 With the Source on, new Issue/MR mentions, project note events and subscribed discussions are polled. Receive-all switches independently add unaddressed Issues, MRs, notes and default-branch CI to the admission rules; GitLab Policy rows are `issues`, `mergeRequests`, `comments`, `ci`. Initial CI is a baseline, later failures/recoveries are events; a pending pipeline is not a recovery. Deleted/unreadable note events are skipped, not treated as authority. Internal notes retain their internal reply audience, including when the original note later disappears; an unknown audience refuses delivery. Keep private source text out of MR descriptions and other broader audiences.
@@ -194,6 +204,8 @@ Check dsh-superagent: run `scripts/dsh-superagent --profile superagent status` i
 
 Setup must succeed before polling or work starts. Overview lists missing requirements and links to their settings. A settings change runs setup again. If you fix something outside the application, such as CLI authentication, choose **Check again**.
 
+Hosting selection has three values: `auto` (the default), `github`, and `gitlab`. Automatic requires exactly one complete configuration: GitHub needs `repository` and `cli`; GitLab needs `host`, `repository`, and `cli`. Source intake may remain off while its account is configured. If neither is complete, Overview asks for either platform; if both are complete, it asks for an explicit choice under Execution. There is no authentication-error fallback to a different host/project. Existing saved explicit selections remain explicit until changed; Automatic can be saved before either account is configured.
+
 1. **Sources.** Configure the chosen GitHub or GitLab repository and isolated agent CLI. GitHub notifications receive new mentions (not Issue-body mention edits); GitLab uses project polling as above. Configure optional Feishu bot CLI, chats and direct-message scope independently.
 2. **Policy.** Edit the example rules and add allowed users for the selected hosting Source and Feishu. Until an allowed list has someone, no request can become a Ticket. Feishu may sync its list from a chosen chat.
 3. **Execution.** Select `repositoryProvider`, the directory root and a prepare command. With a local clone of the selected business repository:
@@ -254,7 +266,7 @@ The blocks:
 - `source:gitlab`: the GitLab object above; `enabled` defaults to false. It supports `observeMergeRequests`, not GitHub's `observePulls`. Add its allowed users/bots/admission rules under `policy.sources.gitlab`.
 - `policy`: `{"rules": […], "sources": {"github": {"allowed": [{"id": "<login>"}], "bots": [{"id": "dependabot[bot]"}]}, "feishu": {"allowed": [{"id": "ou_…", "name": "…"}], "syncChat": "oc_…", "admission": {"oc_…": {"unlistedAddressed": "explicit"}}}}}`. `bots` lists the bots whose messages may become inferred candidates. An `admission` row is keyed by chat id, `other` or `direct` for Feishu, and by `issues`, `pulls`, `comments` or `ci` for GitHub; an unset cell takes its default (see [002 Authorization](002-authorization.md)).
 - `eval`: `mode`, `timeoutSeconds` and `model`.
-- `executor`: `repositoryProvider` (`github` by default, or `gitlab`), `model`, `maxWorkers`, `directory`, `prepare` and `blockedCommands`. Processing pause is separate (`POST executor/pause`).
+- `executor`: `repositoryProvider` (`auto` by default, or explicit `github`/`gitlab`), `model`, `maxWorkers`, `directory`, `prepare` and `blockedCommands`. Processing pause is separate (`POST executor/pause`).
 
 Changing a repository or CLI runs the corresponding setup check first. A failed check returns 400 with details in `setup`. A successful account change, or any save while setup is pending, returns `restarting: true`. The API is temporarily unavailable while the application restarts.
 
@@ -320,6 +332,7 @@ Setup problems appear on the overview with a link to the fix, in the panel's lan
 | `status` exits 2 | A part reports an error, which a restart does not fix: `errors` names each part, as listed under Management API, with its detail; each part clears its own entry once it works again |
 | `status` exits 3 | Setup waits: `setup` says what is missing, and the overview links to the setting that fixes it |
 | `status` exits 1 | The service does not run, runs twice, does not answer, or its runtime reports an error; the output and the newest log say which |
+| `status` reports no process although the panel answers | Some Linux Node.js releases name the main process `MainThread`; the service script recognizes it alongside `node` and `dsh`, and checks the exact DSH entry path on `PATH` plus the profile before sending signals |
 | `… timed out after 90 s`, `… was stopped by …`, `… exited with code …` or `… could not run: …` | A CLI failed without printing why; run the named program by hand as the operator's user to see its own message |
 | The panel says dsh-superagent is not answering | It is restarting, or did not start because of its configuration; the DeepSeek Harness log names the cause |
 | `dsh-superagent configuration has keys it does not use` (log) | Remove the named keys; the message says where each value lives now |

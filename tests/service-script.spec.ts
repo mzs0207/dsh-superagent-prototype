@@ -20,7 +20,7 @@ function sleeper(ignoreInterrupt = false): number {
   sleepers.push(child)
   return child.pid!
 }
-const service = (pid: number, profile = 'superagent') => `${pid} node node /opt/my tools/dsh --profile ${profile} --no-open`
+const service = (pid: number, profile = 'superagent') => `${pid} node node ${join(root, 'bin', 'dsh')} --profile ${profile} --no-open`
 /** Write active process lines (`pid ucomm args`) for the fake ps binary. Entries prefixed with `after:<pid> ` appear only after that PID exits. */
 const processes = (...lines: string[]) => writeFileSync(join(root, 'ps.txt'), lines.map(line => `${line}\n`).join(''))
 const started = (...lines: string[]) => writeFileSync(join(root, 'ps-started.txt'), lines.map(line => `${line}\n`).join(''))
@@ -67,7 +67,7 @@ const status = async (profile: string, url = 'http://127.0.0.1:9') =>
   JSON.parse((await run('status', '--profile', profile, '--url', url)).stdout) as { pids: number[]; manually_stopped: boolean }
 
 it('refuses to stop when two processes serve the profile, before it writes the stop marker', async () => {
-  processes(service(sleeper()), `${sleeper()} node node /opt/dsh --profile=superagent`)
+  processes(service(sleeper()), `${sleeper()} node node ${join(root, 'bin', 'dsh')} --profile=superagent`)
   expect(await run('stop')).toMatchObject({ code: 1, stderr: expect.stringContaining('Multiple dsh-superagent processes found') })
   expect(existsSync(join(control('superagent'), 'manually-stopped'))).toBe(false)
 })
@@ -80,10 +80,34 @@ it('keeps a stop per profile', async () => {
 })
 it('takes no `dsh plugin` command of the profile for its service', async () => {
   const service = sleeper()
-  processes(`${sleeper()} node node /opt/my tools/dsh plugin --profile superagent add link:/x`,
-    `${service} node node /opt/my tools/dsh --profile superagent --no-open`)
+  processes(`${sleeper()} node node ${join(root, 'bin', 'dsh')} plugin --profile superagent add link:/x`,
+    `${service} node node ${join(root, 'bin', 'dsh')} --profile superagent --no-open`)
   expect(await status('superagent')).toMatchObject({ pids: [service] })
 })
+it('recognizes a Linux Node service whose process name is MainThread', async () => {
+  const pid = sleeper()
+  processes(`${pid} MainThread node ${join(root, 'bin', 'dsh')} --profile superagent --no-open`)
+  const checked = await run('status', '--url', await answering(READY, true))
+  expect(checked.code).toBe(0)
+  expect(JSON.parse(checked.stdout)).toMatchObject({ pids: [pid] })
+})
+it('waits for a MainThread service that has not finished graceful shutdown', async () => {
+  const pid = sleeper(true)
+  processes(`${pid} MainThread node ${join(root, 'bin', 'dsh')} --profile superagent --no-open`)
+  expect(await run('stop', '--stop-timeout', '0.1'))
+    .toMatchObject({ code: 1, stderr: expect.stringContaining('Graceful stop timed out') })
+})
+it.each([['node', '/opt/other.js'], ['MainThread', '/opt/other.js'], ['MainThread', '/other/dsh']])(
+  'does not stop unrelated %s program %s using the same profile', async (name, entry) => {
+    const pid = sleeper()
+    processes(`${pid} ${name} node ${entry} ${join(root, 'bin', 'dsh')} --profile superagent`)
+    mkdirSync(control('superagent'), { recursive: true })
+    writeFileSync(join(control('superagent'), 'service.pid'), `${pid}\n`)
+    expect(await status('superagent')).toMatchObject({ pids: [] })
+    expect(await run('stop', '--stop-timeout', '1')).toMatchObject({ code: 0 })
+    expect(sleepers[0]?.exitCode).toBeNull()
+    expect(sleepers[0]?.signalCode).toBeNull()
+  })
 it('records the service PID at start, and still refuses a second instance the scan finds', async () => {
   const url = await answering()
   const pid = sleeper()
@@ -99,7 +123,7 @@ it('records the service PID at start, and still refuses a second instance the sc
   const log = new RegExp(`>> '${checkout}/\\.artifacts/dsh-superagent-superagent-\\d{8}-\\d{6}-\\d+\\.log' 2>&1$`)
   expect(tmux.find(word => word.startsWith('umask 077; exec '))).toMatch(log)
   const second = sleeper()
-  started(service(pid), `${second} node node /opt/dsh --profile superagent`)
+  started(service(pid), service(second))
   const again = await run('start', '--url', url, '--timeout', '10')
   expect(again).toMatchObject({ code: 1, stderr: expect.stringContaining('Multiple dsh-superagent processes') })
   expect(await status('superagent')).toMatchObject({ pids: [pid, second] })
@@ -107,7 +131,7 @@ it('records the service PID at start, and still refuses a second instance the sc
 it('waits only for the process it stopped', async () => {
   const pid = sleeper()
   // Another instance shows up once the stopped one ended.
-  processes(service(pid), `after:${pid} ${sleeper()} node node /opt/dsh --profile superagent`)
+  processes(service(pid), `after:${pid} ${service(sleeper())}`)
   expect(await run('stop', '--stop-timeout', '5')).toMatchObject({ code: 0, stdout: expect.stringContaining('dsh-superagent stopped') })
 }, 20_000)
 it('keeps only the newest logs it wrote for the profile', async () => {

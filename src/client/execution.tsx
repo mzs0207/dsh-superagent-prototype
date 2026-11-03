@@ -98,8 +98,9 @@ export function ExecutionSettings() {
             <select className="dt-select" aria-label={t('repositoryProvider')} value={value.repositoryProvider}
               onChange={event => {
                 const repositoryProvider = event.target.value
-                if (repositoryProvider === 'github' || repositoryProvider === 'gitlab') edit({ repositoryProvider })
+                if (repositoryProvider === 'auto' || repositoryProvider === 'github' || repositoryProvider === 'gitlab') edit({ repositoryProvider })
               }}>
+              <option value="auto">{t('repositoryProviderAuto')}</option>
               <option value="github">GitHub</option><option value="gitlab">GitLab</option>
             </select>
           </Field>

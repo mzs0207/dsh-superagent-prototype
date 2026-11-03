@@ -1,11 +1,13 @@
 /** Structured startup and configuration errors with the settings location where the operator can fix them. */
 import { fill } from './infra/text.ts'
 
-export type SetupPlace = 'deployment' | 'github' | 'gitlab' | 'feishu'
+export type SetupPlace = 'deployment' | 'executor' | 'github' | 'gitlab' | 'feishu'
 export const SETUP_PROBLEMS = {
   foreignFile: ['deployment', '{file} was not written by dsh-superagent; move it, or choose another state directory.'],
   gitTooOld: ['deployment', 'git does not read the selected host credential configuration dsh-superagent writes; dsh-superagent needs git 2.32 or later.'],
   environmentFailed: ['deployment', 'Preparing the agent environment failed.'],
+  repositoryChoiceUnset: ['executor', 'Configure either GitHub (repository and agent CLI) or GitLab (host, project and agent CLI). Only one hosting platform is required.'],
+  repositoryChoiceAmbiguous: ['executor', 'Both GitHub and GitLab are configured. Choose GitHub or GitLab in Execution settings instead of Automatic.'],
   repositoryUnset: ['github', 'The GitHub Source names no repository.'],
   agentCliUnset: ['github', 'The agent GitHub CLI is not set.'],
   agentCliMissing: ['github', 'The agent GitHub CLI was not found.'],

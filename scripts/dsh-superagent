@@ -41,6 +41,10 @@ def stopped(profile):
 
 def serves(args, profile):
     """Return whether command-line arguments belong to the main DSH service process for `profile`."""
+    entry = shutil.which('dsh')
+    command = ' '.join(args[1:] if args and Path(args[0]).name == 'node' else args)
+    if not entry or not (command == entry or command.startswith(entry + ' ')):
+        return False
     words, matched, value = [], False, False
     for word in args[1:]:
         if value:
@@ -55,7 +59,7 @@ def serves(args, profile):
 
 
 def ps(*options, check=False):
-    """Yield `(pid, comm, args)` tuples from `ps`; arguments are split on whitespace, so paths with spaces become several words and only `--profile` and subcommands are inspected."""
+    """Yield `(pid, comm, args)` tuples from `ps`; whitespace-split arguments are rejoined when checking the DSH entry path."""
     result = subprocess.run(['ps', '-ww', *options, '-o', 'pid=,ucomm=,args='], check=check, capture_output=True, text=True)
     for line in result.stdout.splitlines():
         parts = line.split(None, 2)
@@ -65,12 +69,12 @@ def ps(*options, check=False):
 
 def running(pid, profile):
     """Return whether `pid` is currently running the DSH service for `profile` (`ps -p` returns nothing once exited)."""
-    return any(found == pid and name in ('node', 'dsh') and serves(args, profile) for found, name, args in ps('-p', str(pid)))
+    return any(found == pid and name in ('node', 'dsh', 'MainThread') and serves(args, profile) for found, name, args in ps('-p', str(pid)))
 
 
 def processes(profile):
     """Return PIDs of all running DSH service processes for `profile`, including instances started outside this script and the recorded `service.pid` while still running."""
-    found = [pid for pid, name, args in ps('-ax', check=True) if name in ('node', 'dsh') and serves(args, profile)]
+    found = [pid for pid, name, args in ps('-ax', check=True) if name in ('node', 'dsh', 'MainThread') and serves(args, profile)]
     try:
         pid = int((control(profile) / 'service.pid').read_text())
     except (OSError, ValueError):
@@ -174,7 +178,9 @@ def start(args):
         log.touch()
         prune_logs(args.profile)
         # `exec` replaces the shell so the pane PID printed by tmux is the DSH service process itself.
-        command = ('umask 077; exec ' + shlex.join([dsh, '--profile', args.profile, '--no-open'])
+        proxy = [f'{key}={os.environ[key]}' for key in ('HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY') if key in os.environ]
+        invocation = (['env', *proxy] if proxy else []) + [dsh, '--profile', args.profile, '--no-open']
+        command = ('umask 077; exec ' + shlex.join(invocation)
                    + ' >> ' + shlex.quote(str(log)) + ' 2>&1')
         # Reuse an existing tmux session without disturbing other windows.
         target = ['new-window', '-t', '=' + session + ':'] if exists else ['new-session', '-s', session]

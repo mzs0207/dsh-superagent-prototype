@@ -9,6 +9,7 @@ import { key, type AssessmentOutcome, type Mandate, type Policy, type PolicyEffe
   type Trigger, type ActorRef, type GateResult } from './core/index.ts'
 import { sameName } from './infra/text.ts'
 import { WORKER_COMMANDS } from './infra/environment.ts'
+import type { RepositoryProvider } from './deployment.ts'
 
 export const RuleIdSchema = z.string().regex(/^[a-zA-Z0-9_-]{1,80}$/)
 export const RuleMatchSchema = z.object({ rule_id: RuleIdSchema, reason: z.string().trim().min(1).max(500) }).strict()
@@ -89,7 +90,7 @@ const CommandNameSchema = z.string().regex(/^[A-Za-z0-9._-]+$/).refine(name => n
   .refine(name => !WORKER_COMMANDS.includes(name), `${WORKER_COMMANDS.join(', ')} cannot be blocked`)
 /** Executor settings: worker model, concurrency, ticket directory root (empty defaults to `<stateDir>/work`), `prepare` command, and blocked commands. */
 export const ExecutorConfigSchema = z.object({
-  repositoryProvider: z.enum(['github', 'gitlab']).default('github'),
+  repositoryProvider: z.enum(['auto', 'github', 'gitlab']).default('auto'),
   model: RoleModelSchema.nullable().default(null),
   maxWorkers: z.number().int().min(LIMITS.maxWorkers.min).max(LIMITS.maxWorkers.max).default(3),
   directory: z.string().trim().refine(path => path === '' || path.startsWith('/'), 'An absolute path, or empty for <stateDir>/work').default(''),
@@ -109,16 +110,33 @@ export type SettingsBlock = 'policy' | 'eval' | 'executor' | `source:${string}`
 export type SettingsSave = SettingsBlock | 'pause'
 export type SettingsOrigin = 'panel' | 'tool' | 'sync'
 
+export type RepositorySelection = { provider: RepositoryProvider; problem?: undefined }
+  | { provider?: undefined; problem: 'repositoryChoiceUnset' | 'repositoryChoiceAmbiguous' }
+const configured = (value: unknown): boolean => typeof value === 'string' && value.trim().length > 0
+/** Resolve only an unambiguous configured host; authentication never falls back to another repository. */
+export function selectRepositoryProvider(settings: Pick<Settings, 'executor' | 'sources'>): RepositorySelection {
+  const mode = settings.executor.repositoryProvider
+  if (mode !== 'auto') return { provider: mode }
+  const github = settings.sources.github?.config
+  const gitlab = settings.sources.gitlab?.config
+  const hasGithub = configured(github?.repository) && configured(github?.cli)
+  const hasGitlab = configured(gitlab?.host) && configured(gitlab?.repository) && configured(gitlab?.cli)
+  if (hasGithub && hasGitlab) return { problem: 'repositoryChoiceAmbiguous' }
+  if (hasGithub) return { provider: 'github' }
+  if (hasGitlab) return { provider: 'gitlab' }
+  return { problem: 'repositoryChoiceUnset' }
+}
+
 export const POLICY_REVISION = 'mandate-v3'
 /**
  * Compute a version hash for settings that affect work authorization.
  * Changes to models, concurrency, pause state, or polling intervals do not invalidate existing decisions.
  */
 export function policyVersion(settings: Settings): string {
-  const provider = settings.executor.repositoryProvider
-  const repository = settings.sources[provider]?.config
+  const { provider } = selectRepositoryProvider(settings)
+  const repository = provider ? settings.sources[provider]?.config : undefined
   return key(POLICY_REVISION, JSON.stringify({ rules: settings.policy.rules, mode: settings.eval.mode, sources: settings.policy.sources,
-    repository: { provider, host: repository?.host ?? '', path: repository?.repository ?? '' } }))
+    repository: { mode: settings.executor.repositoryProvider, provider, host: repository?.host ?? '', path: repository?.repository ?? '' } }))
 }
 export function allowedSender(settings: Settings, actor: ActorRef): z.infer<typeof AllowedSchema> | undefined {
   return settings.policy.sources[actor.source]?.allowed.find(entry => sameName(entry.id, actor.id))

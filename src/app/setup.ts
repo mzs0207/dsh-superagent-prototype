@@ -3,7 +3,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { UserError } from '../core/index.ts'
 import { SETUP_FIELDS, resolveDeployment, resolveFeishuBot, workerProbe, type Deployment, type Machine } from '../deployment.ts'
 import { agentVariables, applyEnvironment, gitlabEnvironment, verifyEnvironment, withoutDirectory, workerBin, writeEnvironment } from '../infra/environment.ts'
-import type { Settings, SettingsBlock } from '../policy.ts'
+import { selectRepositoryProvider, type Settings, type SettingsBlock } from '../policy.ts'
 import { SetupError, type SetupProblem } from '../setup.ts'
 
 export interface SetupHost {
@@ -61,7 +61,9 @@ export class Setup {
   async checkAccounts(block: SettingsBlock, settings: Settings): Promise<void> {
     const { machine } = this.host
     if (block === 'source:feishu') { await resolveFeishuBot(machine, settings.sources.feishu?.config, this.probe()); return }
-    const provider = block === 'source:gitlab' ? 'gitlab' : block === 'source:github' ? 'github' : settings.executor.repositoryProvider
+    const provider = block === 'source:gitlab' ? 'gitlab' : block === 'source:github' ? 'github' : selectRepositoryProvider(settings).provider
+    // Saving Automatic must be possible before either account is configured; run() reports what is missing.
+    if (!provider) return
     await resolveDeployment(machine, settings.sources[provider]?.config, this.probe(), this.path, provider)
   }
   async blockCommands(blocked: readonly string[]): Promise<void> {
@@ -75,8 +77,10 @@ export class Setup {
   }
   private async resolve(settings: Settings): Promise<Deployment> {
     const { context, machine, lifetime } = this.host
+    const selection = selectRepositoryProvider(settings)
+    if (!selection.provider) throw new SetupError(selection.problem)
+    const provider = selection.provider
     const probe = this.probe()
-    const provider = settings.executor.repositoryProvider
     const deployment = await resolveDeployment(machine, settings.sources[provider]?.config, probe, this.path, provider)
     const feishu = await resolveFeishuBot(machine, settings.sources.feishu?.config, probe).catch((error: unknown) => {
       if (!(error instanceof SetupError)) throw error
