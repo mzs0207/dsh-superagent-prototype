@@ -90,6 +90,8 @@ The default instructions allow auto-merge only for a pull request opened for the
 Reviews without a body, such as approvals, also arrive as Triggers and can wake an Executor waiting for review. These instructions govern the agent, not GitHub's merge rules. To enforce approvals, require them in branch protection and dismiss stale approvals. Omit the merge CLI or remove the auto-merge paragraph to require manual merging.
 
 ZenTao workflows continue after MR merge through a fix-only cherry-pick to `test`, tests in that separate worktree, deployment and live verification. They use `completion: "report"` to prevent merge/closure from ending work early. Their `resume: "manual"` keeps comments and CI from waking a blocked ticket. A nonexistent or unresolved bug reports `blocked` with an evidence note, not the ordinary `dropped` path described below. Successful resolution does not automatically close the bug. See the [deployment contract](006-deployment.md#zentao-assigned-bugs-optional), including the branch-based Jenkins race limitation.
+Manual pauses take precedence over restart-recovery timestamps, including when delivery and the blocked report were recorded in the same millisecond. Recovery neither starts another Assignment nor flushes held inputs until an operator retries.
+Host-side test cherry-picks explicitly use the configured repository account as committer; they do not depend on Git user configuration or environment variables from a worker shell.
 
 
 ## How a Ticket ends

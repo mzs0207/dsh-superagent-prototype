@@ -128,7 +128,8 @@ export function zentaoTools(host: ZentaoToolsHost, initial: Ticket): Tool[] {
       if (!state.mergeCommit || !state.mr) throw new Error('Merge this verified fix into develop first')
       if (args.action === 'sync_test') {
         const result = z.object({ testDirectory: z.string(), testCommit: Sha, testBase: Sha }).parse(JSON.parse(await commands.run('python3',
-          [helper, 'sync', '--repository', directory, '--commit', state.mergeCommit, '--directory', `${directory}-test`], directory)))
+          [helper, 'sync', '--repository', directory, '--commit', state.mergeCommit, '--directory', `${directory}-test`], directory,
+          { DSH_SUPERAGENT_ACCOUNT: deployment.account.login, DSH_SUPERAGENT_COMMIT_EMAIL: deployment.account.email })))
         Object.assign(state, result); persist()
         return { ...result, published: false, next: 'Run targeted tests in testDirectory; then publish_test with their output and affected services.' }
       }

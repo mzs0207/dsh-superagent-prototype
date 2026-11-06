@@ -1,5 +1,6 @@
 import { createServer, type Server } from 'node:http'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -75,13 +76,16 @@ afterEach(async () => {
   const closed = Promise.withResolvers<void>(); server.close(() => closed.resolve()); await closed.promise
   rmSync(directory, { recursive: true, force: true })
 })
-const config = () => ZentaoConfigSchema.parse({ baseUrl, product: 4, account: 'alice', credentialsFile, repository: testDeployment().webUrl })
-function context() {
+const config = (repository = testDeployment().webUrl) => ZentaoConfigSchema.parse({ baseUrl, product: 4, account: 'alice', credentialsFile, repository })
+function context(deployment = testDeployment()) {
   const store = new Store(join(directory, 'store.sqlite'))
-  store.saveSettings(SettingsSchema.parse({ sources: { zentao: { enabled: true, config: config() } } }))
+  store.saveSettings(SettingsSchema.parse({ sources: { zentao: { enabled: true, config: config(deployment.webUrl) } } }))
   const sources = new SourceRegistry(() => store.settings()); sources.register(zentaoKind)
-  const deployment = testDeployment()
-  const commands = new Commands(() => deployment, {}, new AbortController().signal)
+  const gitConfig = join(directory, 'gitconfig')
+  writeFileSync(gitConfig, '[user]\nuseConfigOnly = true\n')
+  const commands = new Commands(() => deployment, { GIT_CONFIG_GLOBAL: gitConfig, GIT_CONFIG_NOSYSTEM: '1',
+    GIT_AUTHOR_NAME: undefined, GIT_AUTHOR_EMAIL: undefined, GIT_COMMITTER_NAME: undefined, GIT_COMMITTER_EMAIL: undefined,
+    DSH_SUPERAGENT_ACCOUNT: undefined, DSH_SUPERAGENT_COMMIT_EMAIL: undefined }, new AbortController().signal)
   const engine = new Engine({ repo: store, scope: sources, assessor: { request: async () => {} }, executor: { start: async () => {}, deliver: async () => {}, stop: async () => {} },
     outbox: { send: () => {}, status: () => undefined, withdraw: () => {} }, policy: () => ({ version: 'test', paused: false, evalTimeoutMs: 60_000, gate: () => ({ admissible: false, reason: 'test' }), revalidate: () => true, admitsInferred: () => false }) })
   const ctx = sourceContextOf({ store, sources, commands, deployment, engine, ready: Promise.resolve(), configured: () => true,
@@ -146,8 +150,8 @@ describe('Zentao comment-only writes', () => {
 })
 
 describe('Zentao workflow boundaries', () => {
-  async function worker() {
-    const value = context()
+  async function worker(deployment = testDeployment()) {
+    const value = context(deployment)
     await pollZentao(value.ctx)
     const trigger = value.store.read.triggers({}).items[0]!
     const ticket: Ticket = { id: 'ticket', title: 'Fix bug', decisionId: 'decision',
@@ -217,6 +221,29 @@ describe('Zentao workflow boundaries', () => {
       await expect(operation.execute({ action: 'merge', mr: 7 }, new AbortController().signal)).rejects.toThrow()
       expect(requests.some(path => path.includes('/resolve'))).toBe(false)
       expect(h.store.tickets.get(h.ticket.id)!.assignments[0]!.report?.state).toBe('blocked')
+    } finally { h.store.close() }
+  })
+  it('cherry-picks with the configured agent identity when the host has no Git user configured', async () => {
+    const deployment = testDeployment({ provider: 'gitlab', origin: 'http://gitlab.invalid', projectId: 1 })
+    const h = await worker(deployment)
+    try {
+      const repository = join(directory, 'repository'), remote = join(directory, 'remote.git')
+      const env = { ...process.env, GIT_CONFIG_GLOBAL: join(directory, 'gitconfig'), GIT_CONFIG_NOSYSTEM: '1',
+        GIT_AUTHOR_NAME: undefined, GIT_AUTHOR_EMAIL: undefined, GIT_COMMITTER_NAME: undefined, GIT_COMMITTER_EMAIL: undefined }
+      const git = (args: string[], cwd = repository) => execFileSync('git', args, { cwd, env, encoding: 'utf8', stdio: 'pipe' }).trim()
+      git(['init', '--bare', remote], directory); git(['clone', remote, repository], directory)
+      writeFileSync(join(repository, 'bug.txt'), 'broken\n'); git(['add', '.'])
+      git(['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-m', 'base'])
+      git(['branch', '-M', 'develop']); git(['branch', 'test'])
+      writeFileSync(join(repository, 'bug.txt'), 'fixed\n')
+      git(['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-am', 'fix'])
+      const head = git(['rev-parse', 'HEAD']); git(['push', 'origin', 'develop', 'test'])
+      h.store.tickets.save({ ...h.ticket, execution: { name: 'identity-smoke', directory: repository, assignment: 'fix' } })
+      h.store.set(KV.zentao.workflow(h.ticket.id), { head, reproduction: 'failed before', tests: 'passed after', mr: 7, mergeCommit: head })
+      await zentaoTools(h.host, h.ticket)[0]!.execute({ action: 'sync_test' }, new AbortController().signal)
+      const copied = h.store.get(KV.zentao.workflow(h.ticket.id))!.testDirectory!
+      expect(readFileSync(join(copied, 'bug.txt'), 'utf8')).toBe('fixed\n')
+      expect(git(['log', '-1', '--format=%cn <%ce>'], copied)).toBe(`${deployment.account.login} <${deployment.account.email}>`)
     } finally { h.store.close() }
   })
 })

@@ -1050,6 +1050,18 @@ describe('replies', () => {
   })
 })
 describe('ticket commands', () => {
+  it('keeps a manual pause across restart even when input delivery and the blocked report share a timestamp', () => {
+    const h = harness({}, { prepareTicket: ticket => ({ ...ticket, resume: 'manual' }) })
+    const ticketId = accepted(h).ticketId!
+    const assignment = runningAssignment(h.repo.tickets.get(ticketId)!)!
+    h.engine.inputsDelivered(ticketId, assignment.id, [])
+    h.engine.report(ticketId, { state: 'blocked', summary: 'Cannot reproduce; waiting for manual retry' })
+    vi.mocked(h.executor.start).mockClear()
+    h.engine.assignmentInterrupted(ticketId, assignment.id)
+    expect(h.repo.tickets.get(ticketId)!.assignments).toHaveLength(1)
+    expect(runningAssignment(h.repo.tickets.get(ticketId)!)?.report?.state).toBe('blocked')
+    expect(h.executor.start).not.toHaveBeenCalled()
+  })
   it('keeps report-completed workflows open after merge and deployment failure until explicit verified completion', () => {
     const h = harness({}, { prepareTicket: ticket => ({ ...ticket, completion: 'report', resume: 'manual' }) })
     const ticketId = accepted(h).ticketId!
