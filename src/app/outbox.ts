@@ -3,6 +3,7 @@ import type { OutboundMessage, Outbox as OutboxPort, ReplyStatus } from '../core
 import type { Commands } from '../infra/commands.ts'
 import { checkedImText } from '../infra/text.ts'
 import type { SourceRegistry } from '../sources/registry.ts'
+import type { FeishuConfig } from '../sources/feishu.ts'
 import { FAILURES_BEFORE_ERROR, Later, type Effects } from './effects.ts'
 import type { Store } from './store.ts'
 
@@ -15,7 +16,7 @@ export interface OutboxHost {
 }
 
 /**
- * Persists outbound channel messages as receipts and delivers them sequentially through `Effects` and `SourceRegistry`.
+ * Persists outbound channel messages as receipts; configured ZenTao notifications use Feishu, otherwise the Source channel.
  * Implements the core `Outbox` port for `Engine` and source contexts, ensuring per-conversation ordering for each ticket until an earlier message fails repeatedly.
  * Messages wait while processing is paused or their source is unavailable, and settle as dropped when the target conversation is ignored or gone.
  */
@@ -44,6 +45,15 @@ export class Outbox implements OutboxPort {
     // Hold later messages for the same ticket and conversation behind an earlier pending message until it exceeds the failure threshold.
     if (store.receipts.behind(id, FAILURES_BEFORE_ERROR)) throw new Later('An earlier message of this ticket to this conversation waits')
     if (!sources.channelAllowed(receipt.channel)) { store.receipts.settle(receipt, 'channelIgnored'); return }
+    // Choose at delivery time so already queued ZenTao notes also respect the operator's notification setting.
+    const feishu = receipt.channel.source === 'zentao' ? sources.instance<FeishuConfig>('feishu') : undefined
+    if (feishu?.enabled && feishu.config.notificationOpenId) {
+      const { bugId, url } = receipt.channel.address
+      const text = `禅道 Bug #${bugId}\n${url}\n\n${receipt.text}`
+      await commands.lark(['im', '+messages-send', '--user-id', feishu.config.notificationOpenId, '--text', text, '--idempotency-key', receipt.id])
+      store.receipts.settle(receipt, 'sent')
+      return
+    }
     // A permanently unreachable target (such as a recalled message or deleted Issue) settles as `channelGone` so its receipt prevents retries.
     const result = await sources.send(receipt, commands)
     if (result === 'waiting') throw new Later('The Source is not installed')

@@ -96,7 +96,7 @@ export function executorTools(host: ExecutorToolsHost, ticket: Ticket): Tool[] {
           const refused = change && (change.provider === 'gitlab'
             ? claimMergeRequest(host.repository, ticketId, change.value) : claimPull(host.repository, ticketId, change.value))
           if (refused) throw new Error(refused)
-          const zentaoNote = guardZentaoReport(host, current, args)
+          const zentaoNotification = guardZentaoReport(host, current, args)
           const report = { state: args.state, summary: args.summary, ...(args.human_action !== undefined ? { question: args.human_action } : {}),
             ...(args.question_for_trigger_id ? { askedBy: args.question_for_trigger_id } : {}),
             ...(args.reply_to_trigger_id ? { answers: args.reply_to_trigger_id } : {}) }
@@ -105,11 +105,11 @@ export function executorTools(host: ExecutorToolsHost, ticket: Ticket): Tool[] {
           if (relay) host.sessions.relay(relay.id, relay.text)
           const notification = relay ? 'orchestrator' : 'internal_only'
           return { reported: true, notification, ...(updated.attention ? { attention: updated.attention } : {}),
-            ...(zentaoNote ? { zentao_note_id: zentaoNote } : {}) }
+            ...(zentaoNotification ? { zentao_notification_id: zentaoNotification } : {}) }
         })
-        if (result.zentao_note_id) {
+        if (result.zentao_notification_id) {
           await host.sendReplies()
-          return { ...result, zentao_note_status: host.store.replyStatus(result.zentao_note_id) ?? 'pending' }
+          return { ...result, zentao_notification_status: host.store.replyStatus(result.zentao_notification_id) ?? 'pending' }
         }
         return result
       },

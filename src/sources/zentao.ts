@@ -22,7 +22,7 @@ export function zentaoTrigger(config: ZentaoConfig, bug: ZentaoBug): Trigger {
   const url = `${config.baseUrl}/bug-view-${bug.id}.html`
   return { id: key('zentao', namespace, String(bug.id), String(bug.activatedCount)), source: 'zentao',
     actor: { source: 'zentao', id: '' }, human: false, at: new Date().toISOString(), threads: [{ source: 'zentao', id: thread }], url,
-    text: `禅道 Bug #${bug.id}: ${bug.title}\n指派给 ${config.account}；状态 active。\n${bug.steps}\n\n按已授权的禅道流程复现并修复；只同步本次修复到 test。不存在或无法解决时备注并暂停。`,
+    text: `禅道 Bug #${bug.id}: ${bug.title}\n指派给 ${config.account}；状态 active。\n${bug.steps}\n\n按已授权的禅道流程复现并修复；只同步本次修复到 test。不存在或无法解决时通知并暂停。`,
     channel: { source: 'zentao', thread, address: { namespace, bugId: String(bug.id), url } },
     meta: { namespace, bugId: bug.id, product: config.product, account: config.account, activatedCount: bug.activatedCount, workflow: 'zentao-bug', repository: config.repository } }
 }
@@ -34,8 +34,8 @@ export function zentaoBlockedNotice(ticket: Ticket, trigger: Trigger, summary: s
 export const zentaoKind: SourceKind<ZentaoConfig> = {
   kind: 'zentao', defaultEnabled: false,
   title: { zh: '禅道', en: 'ZenTao' },
-  description: { zh: '轮询本人名下的活跃 Bug：复现、修复、develop 合并、仅本次修复同步到 test、部署复验。不存在或无法解决时备注并暂停该单。',
-    en: 'Poll assigned active bugs: reproduce, fix, merge to develop, cherry-pick only this fix to test, deploy and verify. Comment and pause when blocked.' },
+  description: { zh: '轮询本人名下的活跃 Bug：复现、修复、develop 合并、仅本次修复同步到 test、部署复验。不存在或无法解决时通知并暂停该单。',
+    en: 'Poll assigned active bugs: reproduce, fix, merge to develop, cherry-pick only this fix to test, deploy and verify. Notify and pause when blocked.' },
   schema: ZentaoConfigSchema,
   fields: [
     { key: 'baseUrl', type: 'text', label: { zh: '禅道地址', en: 'ZenTao URL' }, hint: { zh: '填写安装根路径，例如 http://host:8080/zentao；可粘贴 admin.html 地址。', en: 'Installation root including /zentao; an admin.html URL is also accepted.' } },

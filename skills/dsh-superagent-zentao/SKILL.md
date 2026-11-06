@@ -9,7 +9,7 @@ description: Use when a ticket originates from ZenTao, DSH_SUPERAGENT_ZENTAO_BUG
 
 ## 路由与授权
 
-启用的禅道规则授权对匹配的 active 指派单进行排查，不要求测试人员再 @ 智能体。主 Session 将调查、修复及交付作为同一工单；缺少步骤不等于应静默忽略，应让 worker 查证后备注暂停。不把系统事件伪装成人类请求，不发送 acknowledgement。
+启用的禅道规则授权对匹配的 active 指派单进行排查，不要求测试人员再 @ 智能体。主 Session 将调查、修复及交付作为同一工单；缺少步骤不等于应静默忽略，应让 worker 查证后通知并暂停。不把系统事件伪装成人类请求，不发送 acknowledgement。
 
 本流程是普通“GitLab MR 由人工合并”规则的明确特例：只允许通过 `orchestrator_zentao` 合并当前工单的已验证 MR 到 develop；禁止自行审批、绕过服务器保护规则、直接推送 develop 或裸 CLI 合并。其他来源无此特例。
 
@@ -24,10 +24,12 @@ description: Use when a ticket originates from ZenTao, DSH_SUPERAGENT_ZENTAO_BUG
 7. 用 shell/job 工具执行返回的 `python3 .../release.py deploy --receipt ...` 并等待退出0。它调用仓库 `scripts/jenkins_build.py`，固定 job `web-community-backend-pipeline`、branch=test、DEPLOY=true，保存 build/queue 检查点并核对实际 checkout SHA。不可只看到“已入队”就算部署成功。
 8. 重跑原测试环境复现场景，确认接口/页面及运行版本。`action=resolve,resolved_build=<禅道数字build ID>,verification=<部署后复验命令、时间、结果>` 核验真实 Jenkins 后写回证据并标记 fixed；不要用 Jenkins build 号或中文版本标题冒充禅道 build ID。成功后才 report ready；不自动关闭 Bug，不重复发送工具已经写回的结果。
 
-## 备注并暂停
+## 通知并暂停
 
 不存在、无法复现/解决、合并冲突、审批/权限阻塞、测试失败、Jenkins失败或无法验证部署，调用 `orchestrator_report(state=blocked,summary=<已查证据、结论、阻塞原因及缺少的信息>)`。
 
-返回 `zentao_note_status=sent` 才能说备注成功；pending 表示备注仍在持久化队列中等待补送，但必须立即停止代码/发布动作。不得改 Bug 为已关闭、已解决、延期或重新指派来代替备注；不要用 dropped。
+宿主按发送时配置选择通知方式：飞书已启用且设置了 `sources.feishu.config.notificationOpenId` 时，只向该固定收件人发送机器人私聊，不新增禅道备注；未配置或关闭飞书时保留备注。授权用户名单变化不改变收件人。不要自行用 CLI 补发备注或重复发送工具已经排队的通知；修复成功的 `resolve` 证据仍写回禅道。
 
-暂停后轮询、评论、CI消息或服务重启都不是恢复授权。只有面板人工 Retry 才恢复。即使看似临时 Jenkins 故障，也不得自行重跑；人工重试后先读检查点和远端状态，已成功的合并、推送、备注不重复；不明确的入队请求先人工查 Jenkins，禁止重复触发。
+返回 `zentao_notification_status=sent` 才能说通知成功；pending 表示仍在持久化队列中等待补送，飞书发送失败不会自动回退为备注。无论通知是否成功，都必须立即停止代码/发布动作。不得改 Bug 为已关闭、已解决、延期或重新指派来代替通知；不要用 dropped。
+
+暂停后轮询、评论、CI消息或服务重启都不是恢复授权。只有面板人工 Retry 才恢复。即使看似临时 Jenkins 故障，也不得自行重跑；人工重试后先读检查点和远端状态，已成功的合并、推送、通知不重复；不明确的入队请求先人工查 Jenkins，禁止重复触发。

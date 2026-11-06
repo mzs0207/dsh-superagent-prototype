@@ -137,7 +137,7 @@ The bundled `release.py` uses the business repository's `scripts/jenkins_build.p
 
 **Branch-based deployment limitation:** the existing Jenkins job checks out the latest `test`, not an immutable SHA. Another writer can advance it while a build is queued. This integration does not modify that shared pipeline. It checks the branch before triggering and compares Jenkins's actual checkout SHA afterward; a mismatch pauses the bug, but cannot undo an already-performed deployment. The bug is marked `fixed` only after matching successful builds and a fresh test-environment verification. The ZenTao resolved-build value must be a numeric ZenTao build ID, not a Jenkins build number.
 
-MR merge does not finish this workflow. A nonexistent, unreproducible or unsolvable bug, failed test, conflict, missing permission or deployment failure must report **blocked**, which queues an evidence note and pauses that ticket. A pending note is shown as pending, not claimed delivered; the outbox retries delivery without restarting code work. Incoming comments/CI and service restarts cannot resume it. Use the panel's **Retry** only after addressing the blocker; inspect persisted checkpoints first, and never repeat a successful merge/push/build. The workflow does not close bugs, reassign them, or mark them postponed merely to add a note.
+MR merge does not finish this workflow. A nonexistent, unreproducible or unsolvable bug, failed test, conflict, missing permission or deployment failure must report **blocked**, which queues an evidence notification and pauses that ticket. With Feishu enabled and `sources.feishu.config.notificationOpenId` set, all queued ZenTao notices and questions go privately to that fixed recipient instead of adding bug comments. Otherwise the original comment delivery remains. The recipient is independent of the allowed-user list. Delivery uses the settings at send time, including for already-pending notes; previously sent notes are not replayed. Feishu failures remain pending for retry, without an automatic comment fallback. `zentao_notification_status=sent` confirms delivery; pending does not. Incoming comments/CI and service restarts cannot resume code work. Use the panel's **Retry** only after addressing the blocker; inspect persisted checkpoints first, and never repeat a successful merge/push/build. Successful `fixed` resolution still records its verification evidence in ZenTao; the workflow does not close bugs, reassign them, or mark them postponed just to notify someone.
 
 ### Feishu bot (optional)
 
@@ -160,6 +160,8 @@ MR merge does not finish this workflow. A nonexistent, unreproducible or unsolva
    The host refuses a CLI that can act as a user. It reads the app id, Feishu/Lark brand and bot `open_id` from the bot configuration.
 
    Both configurations share the keychain entry for the app secret. To remove only the bot configuration, delete its directory; do not run `lark-cli config remove`, which would affect the shared secret.
+
+For private ZenTao alerts, set **Settings → Sources → Feishu → ZenTao notification recipient open_id** (`notificationOpenId`) to one person's `ou_…` ID and enable Feishu. Leaving it empty or disabling Feishu keeps ZenTao comments. The bot sends the Bug number/link, blocker evidence and manual-retry instructions; it does not broadcast to authorized users or configured chats. This does not grant the recipient authority to start work.
 
 ## Install
 

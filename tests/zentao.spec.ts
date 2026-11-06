@@ -3,7 +3,7 @@ import { execFileSync } from 'node:child_process'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ZentaoClient } from '../src/sources/zentao-client.ts'
 import { pollZentao, zentaoKind, ZentaoConfigSchema } from '../src/sources/zentao.ts'
 import { Store } from '../src/app/store.ts'
@@ -15,6 +15,10 @@ import { Commands } from '../src/infra/commands.ts'
 import { testDeployment } from './fixtures/deployment.ts'
 import { KV } from '../src/kv.ts'
 import { guardZentaoReport, zentaoTools, type ZentaoToolsHost } from '../src/app/tools/zentao.ts'
+import { feishuKind } from '../src/sources/feishu.ts'
+import { Outbox } from '../src/app/outbox.ts'
+import { Effects } from '../src/app/effects.ts'
+import { HealthBoard } from '../src/infra/health.ts'
 
 interface FixtureBug extends Record<string, unknown> {
   id: string; assignedTo: { account: string }; actions: { id: number; comment: string; actor: string }[]
@@ -80,17 +84,20 @@ const config = (repository = testDeployment().webUrl) => ZentaoConfigSchema.pars
 function context(deployment = testDeployment()) {
   const store = new Store(join(directory, 'store.sqlite'))
   store.saveSettings(SettingsSchema.parse({ sources: { zentao: { enabled: true, config: config(deployment.webUrl) } } }))
-  const sources = new SourceRegistry(() => store.settings()); sources.register(zentaoKind)
+  const sources = new SourceRegistry(() => store.settings()); sources.register(zentaoKind); sources.register(feishuKind)
   const gitConfig = join(directory, 'gitconfig')
   writeFileSync(gitConfig, '[user]\nuseConfigOnly = true\n')
   const commands = new Commands(() => deployment, { GIT_CONFIG_GLOBAL: gitConfig, GIT_CONFIG_NOSYSTEM: '1',
     GIT_AUTHOR_NAME: undefined, GIT_AUTHOR_EMAIL: undefined, GIT_COMMITTER_NAME: undefined, GIT_COMMITTER_EMAIL: undefined,
     DSH_SUPERAGENT_ACCOUNT: undefined, DSH_SUPERAGENT_COMMIT_EMAIL: undefined }, new AbortController().signal)
+  let now = Date.now()
+  const effects = new Effects(store, new HealthBoard(), () => now)
+  const outbox = new Outbox({ store, effects, sources, commands, paused: () => false })
   const engine = new Engine({ repo: store, scope: sources, assessor: { request: async () => {} }, executor: { start: async () => {}, deliver: async () => {}, stop: async () => {} },
-    outbox: { send: () => {}, status: () => undefined, withdraw: () => {} }, policy: () => ({ version: 'test', paused: false, evalTimeoutMs: 60_000, gate: () => ({ admissible: false, reason: 'test' }), revalidate: () => true, admitsInferred: () => false }) })
+    outbox, policy: () => ({ version: 'test', paused: false, evalTimeoutMs: 60_000, gate: () => ({ admissible: false, reason: 'test' }), revalidate: () => true, admitsInferred: () => false }) })
   const ctx = sourceContextOf({ store, sources, commands, deployment, engine, ready: Promise.resolve(), configured: () => true,
-    receive: trigger => engine.receive(trigger), outbox: { send: message => { store.receipts.add(message) } } }, zentaoKind)
-  return { store, ctx, engine }
+    receive: trigger => engine.receive(trigger), outbox }, zentaoKind)
+  return { store, ctx, engine, outbox, effects, advance: (ms: number) => { now += ms } }
 }
 describe('Zentao intake', () => {
   it('paginates unclosed and admits only this product’s active assigned bugs, including the initial backlog', async () => {
@@ -164,6 +171,82 @@ describe('Zentao workflow boundaries', () => {
     const host: ZentaoToolsHost = { store: value.store, repository: value.ctx, resources: { store: value.store } }
     return { ...value, host, ticket }
   }
+  function notifications(h: Awaited<ReturnType<typeof worker>>, enabled = true, notificationOpenId = 'ou_operator') {
+    const settings = h.store.settings()
+    h.store.saveSettings({ ...settings,
+      sources: { ...settings.sources, feishu: { enabled, config: { notificationOpenId } } },
+      policy: { ...settings.policy, sources: { ...settings.policy.sources,
+        feishu: { allowed: [{ id: 'ou_operator' }, { id: 'ou_another' }], admission: {} } } } })
+  }
+  it.each(['blocked', 'failed'] as const)('delivers %s evidence privately to the fixed operator, never as a bug comment', async state => {
+    const h = await worker()
+    const sent = vi.spyOn(h.ctx.commands, 'lark').mockResolvedValue({})
+    try {
+      notifications(h)
+      const report = { state, summary: `无法复现，请补充测试账号。\n${'已检查相关日志和接口。'.repeat(60)}` }
+      const id = guardZentaoReport(h.host, h.ticket, report)!
+      h.engine.report(h.ticket.id, report)
+      h.effects.start(); await h.outbox.sent()
+      expect(h.store.replyStatus(id)).toBe('sent')
+      expect(sent).toHaveBeenCalledExactlyOnceWith(['im', '+messages-send', '--user-id', 'ou_operator', '--text',
+        expect.stringContaining(report.summary), '--idempotency-key', id])
+      const text = sent.mock.calls[0]![0][5]!
+      expect(text).toContain('禅道 Bug #1')
+      expect(text).toContain(`${baseUrl}/bug-view-1.html`)
+      expect(text).toContain('手动重试')
+      expect(comments).toEqual([])
+      await pollZentao(h.ctx); await h.outbox.sent()
+      expect(sent).toHaveBeenCalledTimes(1)
+      expect(h.store.tickets.get(h.ticket.id)!.assignments[0]!.report?.state).toBe(state)
+    } finally { await h.effects.drain(); sent.mockRestore(); h.store.close() }
+  })
+  it.each([{ enabled: false, recipient: 'ou_operator' }, { enabled: true, recipient: '' }])('keeps comment delivery when Feishu notifications are not enabled: %j', async ({ enabled, recipient }) => {
+    const h = await worker()
+    const sent = vi.spyOn(h.ctx.commands, 'lark').mockResolvedValue({})
+    try {
+      notifications(h, enabled, recipient)
+      const id = guardZentaoReport(h.host, h.ticket, { state: 'blocked', summary: '缺少复现账号。' })!
+      h.effects.start(); await h.outbox.sent()
+      expect(h.store.replyStatus(id)).toBe('sent')
+      expect(comments).toHaveLength(1)
+      expect(comments[0]).toContain('缺少复现账号。')
+      expect(sent).not.toHaveBeenCalled()
+      expect(rows[0]).toMatchObject({ status: 'active', assignedTo: { account: 'alice' } })
+    } finally { await h.effects.drain(); sent.mockRestore(); h.store.close() }
+  })
+  it('retries a failed Feishu delivery without falling back to a comment or restarting the ticket', async () => {
+    const h = await worker()
+    const sent = vi.spyOn(h.ctx.commands, 'lark').mockRejectedValueOnce(new Error('Feishu unavailable')).mockResolvedValue({})
+    try {
+      notifications(h)
+      const report = { state: 'blocked' as const, summary: '合并冲突，需要人工处理。' }
+      const id = guardZentaoReport(h.host, h.ticket, report)!
+      h.engine.report(h.ticket.id, report)
+      h.effects.start(); await h.outbox.sent()
+      expect(h.store.replyStatus(id)).toBe('pending')
+      expect(comments).toEqual([])
+      h.advance(5000); await h.outbox.sent()
+      expect(h.store.replyStatus(id)).toBe('sent')
+      expect(sent).toHaveBeenCalledTimes(2)
+      expect(sent.mock.calls[0]![0]).toEqual(sent.mock.calls[1]![0])
+      expect(comments).toEqual([])
+      expect(h.store.tickets.get(h.ticket.id)!.assignments.map(item => item.report?.state)).toEqual(['blocked'])
+    } finally { await h.effects.drain(); sent.mockRestore(); h.store.close() }
+  })
+  it('routes an already queued human-action reply through Feishu when notifications are enabled before delivery', async () => {
+    const h = await worker()
+    const sent = vi.spyOn(h.ctx.commands, 'lark').mockResolvedValue({})
+    try {
+      h.engine.report(h.ticket.id, { state: 'blocked', summary: '缺少账号', question: '请提供测试账号。' })
+      const reply = h.engine.reply({ purpose: 'attention', ticketId: h.ticket.id, question: '请提供测试账号。', text: '请提供测试账号。' })
+      notifications(h)
+      h.effects.start(); await h.outbox.sent()
+      expect(h.store.replyStatus(reply.id)).toBe('sent')
+      expect(sent).toHaveBeenCalledExactlyOnceWith(['im', '+messages-send', '--user-id', 'ou_operator', '--text',
+        expect.stringContaining('请提供测试账号。'), '--idempotency-key', reply.id])
+      expect(comments).toEqual([])
+    } finally { await h.effects.drain(); sent.mockRestore(); h.store.close() }
+  })
   it('rejects ready and dropped before verified deployment rather than silently ending the bug', async () => {
     const h = await worker()
     try {

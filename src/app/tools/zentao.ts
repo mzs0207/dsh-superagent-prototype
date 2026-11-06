@@ -40,12 +40,12 @@ const MergeRequest = GitlabMergeRequestSchema.extend({ merge_commit_sha: Sha.nul
   draft: z.boolean().optional(), work_in_progress: z.boolean().optional(), blocking_discussions_resolved: z.boolean().optional(),
   head_pipeline: z.looseObject({ status: z.string(), sha: z.string() }).nullish() })
 
-/** Runs inside the report transaction: queue the note before pausing; failed delivery remains in the durable outbox. */
+/** Runs inside the report transaction: queue the notification before pausing; failed delivery remains in the durable outbox. */
 export function guardZentaoReport(host: ZentaoToolsHost, ticket: Ticket, report: { state: string; summary: string; human_action?: string | null }): string | undefined {
   const trigger = host.resources.store.triggers.get(ticket.origin.triggerId)
   if (trigger?.source !== 'zentao') return undefined
   const previous = latestReport(ticket)
-  if (report.state === 'dropped') throw new Error('ZenTao bugs must be commented and paused with state=blocked, not dropped or closed')
+  if (report.state === 'dropped') throw new Error('ZenTao bugs must be notified and paused with state=blocked, not dropped or closed')
   if ((previous?.state === 'blocked' || previous?.state === 'failed') && report.state !== 'blocked' && report.state !== 'failed') throw new Error('This bug is paused; only a manual ticket retry may resume it')
   if (report.state === 'ready' && !host.repository.state.get(KV.zentao.workflow(ticket.id))?.resolved) throw new Error('Complete test deployment, verification and ZenTao resolution before reporting ready')
   if (report.state !== 'blocked' && report.state !== 'failed') return undefined

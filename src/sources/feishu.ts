@@ -25,6 +25,7 @@ const FeishuConfigSchema = FeishuBotSchema.extend({
     .refine(chats => new Set(chats.map(chat => chat.chatId)).size === chats.length, 'Duplicate chat IDs')
     .default([]),
   directMessages: z.boolean().default(true),
+  notificationOpenId: z.string().trim().regex(/^(ou_[a-zA-Z0-9]+)?$/).default(''),
   otherChats: z.enum(['none', 'mentions']).default('none'),
 }).strict()
 export type FeishuConfig = z.infer<typeof FeishuConfigSchema>
@@ -46,6 +47,8 @@ export const feishuKind: SourceKind<FeishuConfig> = {
     { key: 'otherChats', type: 'select', label: { zh: '其他群', en: 'Other chats' }, options: [{ value: 'none', label: { zh: '不接收', en: 'Not received' } }, { value: 'mentions', label: { zh: '仅 @', en: '@ only' } }],
       hint: { zh: '机器人已加入、但没列在上面的群。“仅 @”接收那里 @ 机器人的消息；谁的消息能发起工作看策略里的准入。', en: 'Chats the bot has joined that are not listed above. "@ only" receives messages there that mention the bot; whose messages may originate work is the Policy\'s admission.' } },
     { key: 'directMessages', type: 'switch', label: { zh: '接收私聊', en: 'Direct messages' } },
+    { key: 'notificationOpenId', type: 'text', pattern: '(ou_[a-zA-Z0-9]+)?', label: { zh: '禅道通知收件人 open_id', en: 'ZenTao notification recipient open_id' },
+      hint: { zh: '启用飞书并填写后，禅道异常和补充问题只私聊此人，不再新增备注；留空或关闭飞书时仍写备注。与授权用户名单无关。', en: 'With Feishu enabled, send ZenTao notices and questions privately to this user instead of adding bug comments. Empty or Feishu off keeps comments. Independent of the allowed-user list.' } },
     { key: 'readPageSize', type: 'number', advanced: true, min: 1, max: 50, label: { zh: '每页消息数', en: 'Messages per page' }, hint: { zh: '智能体读取线程和群历史时，每页的消息数。', en: 'Messages per page when agents read Threads and chat history.' } },
     { key: 'linkTimeoutMs', type: 'number', advanced: true, min: 1, max: 90000, label: { zh: '原消息链接的查询时限 / 毫秒', en: 'Original message link time limit / ms' },
       hint: { zh: '查询原消息链接最多等待的时间；超时后智能体改为直接读取原消息。', en: 'How long to wait for an original message\'s link; after that, agents read the message itself.' } },
