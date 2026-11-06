@@ -4,6 +4,8 @@ Authorization determines who may start work and what that work may include. This
 
 The host enforces allowed lists, rules and Mandates. Messages, comments and quoted documents are inputs to a decision; they cannot change those permissions.
 
+Accept mode defaults to `eval.mode`. A Source's Policy may override it with `mode: "off" | "observe" | "auto"`; omitted mode or `"inherit"` keeps the global default. Global `off` remains a veto for all inferred work, regardless of Source overrides. Candidate cards, assessment decisions, final acceptance and Mandate revalidation use the same effective mode. This permits ZenTao automation while unrelated chat/repository candidates remain observe-only. The processing pause still stops all execution, including explicit requests.
+
 ## Two paths for a Trigger
 
 ### Eval: deciding whether to start work

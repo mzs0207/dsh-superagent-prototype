@@ -283,6 +283,10 @@ export interface Ticket {
   channels: ChannelRef[]
   /** When, by whom, and how the ticket ended, with a person's or the host's reason beyond the outcome; an open ticket has none. */
   ended?: { at: string; by: TicketEndBy; outcome: TicketOutcome; reason?: string }
+  /** Multi-step delivery workflows finish on a worker report, never merely because an MR merged. */
+  completion?: 'report'
+  /** Paused workflows keep all incoming messages as context until an operator explicitly retries. */
+  resume?: 'manual'
   /** Open question for a person; cleared by the executor or when the ticket ends. */
   attention?: Attention
   assignments: Assignment[]

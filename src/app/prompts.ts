@@ -23,7 +23,7 @@ const SkillNameSchema = z.string().regex(SKILL_NAME).refine(name => !(Object.key
 /** The built-in parts a team may override, by key: both roles' parts, the Source skills, and the generated parts' templates. */
 const PART_KEYS = ['runtime/shared', 'runtime/orchestrator', 'runtime/worker', 'runtime/subscriptions', 'runtime/replies',
   'runtime/dispatch', 'runtime/work', 'runtime/admission', 'runtime/handoff/orchestrator', 'runtime/handoff/worker', 'runtime/environment',
-  'runtime/policy', 'runtime/policy/none', 'skill/feishu', 'skill/github', 'skill/gitlab'] as const
+  'runtime/policy', 'runtime/policy/none', 'skill/feishu', 'skill/github', 'skill/gitlab', 'skill/zentao'] as const
 export type PartKey = typeof PART_KEYS[number]
 /** A team's text for a built-in part, and `base`, the key of the built-in text it was edited from. */
 const OverrideSchema = z.object({ text: z.string(),
@@ -68,6 +68,7 @@ export const builtInParts = (): Readonly<Record<PartKey, BuiltInPart>> => parts 
   'skill/feishu': { roles: BOTH, text: `${sourceSkills.feishu}\n\n## CLI usage\n${cliNotes}` },
   'skill/github': { roles: BOTH, text: `${sourceSkills.github}\n\n## CLI usage\n${cliNotes}` },
   'skill/gitlab': { roles: BOTH, text: `${sourceSkills.gitlab}\n\n## CLI usage\n${cliNotes}` },
+  'skill/zentao': { roles: BOTH, text: sourceSkills.zentao },
 }
 /** The key of a built-in text, which an override's `base` records. */
 export const builtInBase = (text: string): string => key('prompt-built-in', text)
@@ -94,7 +95,9 @@ export function policySection(settings: Settings, config: PromptConfig = default
   const line = (text: string) => text.replace(/\s*\n\s*/g, ' ')
   const rules = settings.policy.rules.filter(rule => rule.enabled).map(({ id, name, instruction }) => `- ${line(name)} (${id}): ${line(instruction)}`)
   const part = rules.length ? 'runtime/policy' : 'runtime/policy/none'
-  return { key: part, text: fill(builtIn(config, part), { version: policyVersion(settings), mode: settings.eval.mode, rules: rules.join('\n') }) }
+  const overrides = Object.entries(settings.policy.sources).filter(([, part]) => part.mode && part.mode !== 'inherit').map(([source, part]) => `${source}=${part.mode}`)
+  const mode = settings.eval.mode + (overrides.length ? ` by default; Source overrides: ${overrides.join(', ')}; use each candidate's effective mode` : '')
+  return { key: part, text: fill(builtIn(config, part), { version: policyVersion(settings), mode, rules: rules.join('\n') }) }
 }
 /**
  * Assemble a role's system prompt sections in order from fixed templates, team sections, the generated execution environment
@@ -119,7 +122,7 @@ export function composePrompt(config: PromptConfig, role: Role, environment?: st
   return promptParts(config, role, environment, policy).map(part => part.text).join('\n\n')
 }
 export function composeSkill(config: PromptConfig, name: string): string {
-  return name === 'feishu' || name === 'github' ? builtIn(config, `skill/${name}`) : config.skills[name] ?? ''
+  return name === 'feishu' || name === 'github' || name === 'gitlab' || name === 'zentao' ? builtIn(config, `skill/${name}`) : config.skills[name] ?? ''
 }
 
 /** An override whose built-in text changed since its `base`, with that text when kept, or whose part this version no longer has. */
@@ -145,7 +148,10 @@ export class Prompts {
   }
   /** Returns skills to register in every Session: built-in Source skills (`feishu` only when a Feishu bot is configured) followed by team skills. */
   skills(config: PromptConfig): [string, string][] {
-    return [...this.feishu() ? ['feishu'] : [], 'github', ...Object.keys(config.skills)].map(name => [name, composeSkill(config, name)])
+    const variables = this.environment() ?? []
+    const provider = variables.find(variable => variable.key === 'DSH_SUPERAGENT_REPOSITORY_PROVIDER')?.value === 'gitlab' ? 'gitlab' : 'github'
+    const zentao = variables.some(variable => variable.owner === 'zentao')
+    return [...this.feishu() ? ['feishu'] : [], provider, ...zentao ? ['zentao'] : [], ...Object.keys(config.skills)].map(name => [name, composeSkill(config, name)])
   }
   current(): PromptVersion {
     const revision = this.versions.revision()

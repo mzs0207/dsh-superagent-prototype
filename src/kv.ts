@@ -6,6 +6,7 @@ import type { PromptVersion } from './app/prompts.ts'
 import type { SettingsVersion } from './app/store.ts'
 import type { SettingsSave } from './policy.ts'
 import type { Retry } from './sources/github.ts'
+import type { ZentaoWorkflow } from './app/tools/zentao.ts'
 
 /** Key of a KV record whose value has type `V`; a plain string represents an untyped key. */
 export type Key<V> = string & { readonly __value?: V }
@@ -54,6 +55,8 @@ export const KV = {
     thread: family<string, [thread: string]>('gitlab-thread:'),
     branch: family<string, [namespace: string]>('gitlab-branch:'),
     ci: family<{ fingerprint?: string; revision: number }, [namespace: string, target: string]>('gitlab-ci:') },
+  /** Verified revision and release checkpoints for one ZenTao ticket. */
+  zentao: { workflow: family<ZentaoWorkflow>('zentao-workflow:') },
   /**
    * Feishu Source: known chats (`true` for direct messages); per-chat history cursor and active topics mapped from topic ID
    * to last-seen timestamp; and per-polled-thread seen message IDs and initialization flag.

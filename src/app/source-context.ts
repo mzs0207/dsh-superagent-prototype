@@ -1,5 +1,5 @@
 /** Scoped runtime context exposed to each Source kind, isolating Sources from direct Store or Engine access. */
-import type { EngineForSources, ReceiveResult, Trigger } from '../core/index.ts'
+import type { EngineForExecutor, EngineForSources, ReceiveResult, Trigger } from '../core/index.ts'
 import type { Deployment } from '../deployment.ts'
 import type { Commands } from '../infra/commands.ts'
 import type { SetupProblem } from '../setup.ts'
@@ -11,7 +11,7 @@ import type { Store } from './store.ts'
 export interface SourceContextDeps {
   readonly store: Pick<Store, 'atomic' | 'get' | 'set' | 'delete' | 'keys' | 'threads' | 'tickets' | 'triggers' | 'read'>
   readonly outbox: Pick<Outbox, 'send'>
-  readonly engine: Pick<EngineForSources, 'bindThread' | 'threadClosed'>
+  readonly engine: Pick<EngineForSources, 'bindThread' | 'threadClosed'> & Pick<EngineForExecutor, 'report'>
   readonly commands: Commands
   readonly sources: SourceRegistry
   /** Throws when accessed before initial setup completes. */
@@ -59,6 +59,7 @@ export function sourceContextOf(deps: SourceContextDeps, kind: { kind: string; h
     tickets: {
       get: id => store.tickets.get(id),
       open: () => store.tickets.open(),
+      block: (id, summary) => { store.atomic(() => deps.engine.report(id, { state: 'blocked', summary })) },
       bindThread: (id, thread, own) => { deps.engine.bindThread(id, thread, own) },
       threadClosed: (thread, outcome, at) => { deps.engine.threadClosed(thread, outcome, at) },
     },

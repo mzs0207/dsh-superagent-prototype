@@ -189,11 +189,14 @@ Sources extend the host through `SourceKind`, defined in `src/sources/kind.ts`. 
 Registry configuration methods include `kind`, `instances`, `instance`, `validate`, `validatePolicy`, `policyPart`, `channelAllowed`, `declarations`, `environments`, `find` and `scope`. `find` asks each kind that supports search.
 `selectRepositoryProvider` in `policy.ts` resolves explicit hosting choices or Automatic's unique complete Source configuration. Setup, Policy versions, search and Source enablement share that result. Missing/ambiguous Automatic choices disable hosting Sources and produce an Execution-settings problem, without probing an unrelated CLI. `defaultEnabled: false` keeps GitLab intake opt-in; configuration alone never enables it. `find(query, config)` checks private origins and nested project paths.
 
-Generic code accesses Source behavior through the registry. `send(message, commands)` calls the kind's Channel and returns `sent`, `gone` or `waiting` if the kind is not installed. `link` resolves its Channel link. `threadContext` pairs a kind's reader with its configuration, or returns nothing when the kind has no reader. Invalid stored configuration disables the instance.
+Generic code accesses Source behavior through the registry. `send(message, commands)` calls the kind's `channel.send({ commands }, message, currentConfig)` and returns `sent`, `gone` or `waiting` if the kind is not installed. The current configuration lets independent Sources authenticate without putting credentials into channel addresses. `link` resolves its Channel link. `threadContext` pairs a kind's reader with its configuration, or returns nothing when the kind has no reader. Invalid stored configuration disables the instance.
 
 Plugins receive `SourceHost`: the registry and `context(kind)`. The kind itself uses a narrower `SourceContext`, built by `sourceContextOf` in `src/app/source-context.ts`.
 
 That context supplies deployment and commands, setup readiness (`ready`, `configured`, `problem`), configuration, `receive`, `atomic`, and typed `state`. It also exposes Thread reads and metadata writes, Ticket reads and binding/closure commands, Trigger reads, `notify` through Outbox, and `report` for declared health entries.
+
+ZenTao is an independent Source (`sources/zentao.ts`, `zentao-client.ts`). Its ticket-scoped tools keep verification/release checkpoints in the existing KV store. Such tickets set `completion: "report"` (MR closure records a fact but does not end delivery) and `resume: "manual"` (blocked inputs remain context until an operator retries). The ordinary lifecycle remains unchanged. Native comment IDs are reconciled against the bug's action history; failed/blocked notes use the durable outbox. The release helper persists the exact cherry-picked commit under the Git common directory and per-service Jenkins receipts outside worktrees.
+
 
 ### DshExecutor
 
@@ -343,6 +346,7 @@ Generic modules have the following deliberate Source-specific boundaries:
 | `src/app/tools/tool.ts` | The `Tool` type, `readTool`, the `orchestrator_read` of both roles, and `AcknowledgementSchema` |
 | `src/app/tools/main.ts` | The main Session's tools |
 | `src/app/tools/executor.ts` | An Executor Session's tools |
+| `src/app/tools/zentao.ts` | Ticket-scoped reproduction/verification checkpoints, guarded develop merge, fix-only test publication and confirmed resolution; failures block and notify |
 | `src/app/http.ts` | The `/orchestrator/api` routes: the same-origin check, request limits and one status per kind of failure |
 | `src/app/api.ts` | `Api`, every route with its parameters, query, body and response, and the filters of the lists; it imports only types, so the panel bundles it |
 | `src/app/views/text.ts` | The two forms of a view's text: `preview`, plain text on one line, and `markdown` without HTML; `plain` and `readable` |
@@ -369,6 +373,7 @@ Generic modules have the following deliberate Source-specific boundaries:
 | `src/sources/github-channel.ts` | The GitHub Channel: comments and review thread replies, `sent` or `gone` |
 | `src/sources/github-read.ts` | CI snapshots, `github/` resources and paginated conversation context |
 | `src/sources/gitlab.ts`, `gitlab-trigger.ts`, `gitlab-read.ts`, `gitlab-channel.ts`, `gitlab-change.ts` | `./gitlab-watch`: project roots/events, subscribed notes, CI baseline/transitions, native resources/discussions, private idempotent replies and MR lifecycle |
+| `src/sources/zentao.ts`, `zentao-client.ts` | Assigned active bug polling, stable activation IDs, native comment reconciliation, attachment reads and release-failure observation |
 | `src/sources/change.ts`, `repository.ts` | Shared ownership/binding/terminal notices; provider-native repository files and directory listings |
 | `src/sources/feishu.ts` | The Feishu kind and plugin entry, exported as `./feishu-watch` |
 | `src/sources/feishu-trigger.ts` | Feishu messages as Triggers, by one rule for live events, history pages and topic pages |
@@ -411,6 +416,7 @@ Generic modules have the following deliberate Source-specific boundaries:
 | `tests/policy.spec.ts` | Source scope, the gate, the admission table, Mandate revalidation, the Policy version, settings migrations and assessment outcomes |
 | `tests/registry.spec.ts` | `SourceRegistry`: instances, validation, Policy parts, Channels and Thread context |
 | `tests/sources.spec.ts` | The Feishu and GitHub Sources on a `SourceContext`: translation, polls and read positions, the pull request rules, health |
+| `tests/zentao.spec.ts`, `tests/zentao-release.spec.ts` | Assigned-bug scope, pagination, deduplication, comment/resolve reconciliation, durable failure pause, native Git fix-only copying and Jenkins evidence guards |
 | `tests/commands.spec.ts` | CLI calls as the deployment's accounts, the Channels' answers, and repository-scoped GitHub calls |
 | `tests/feishu-read.spec.ts`, `tests/github-read.spec.ts` | Feishu and GitHub reads |
 | `tests/gitlab-deployment.spec.ts`, `tests/gitlab-environment.spec.ts` | Private origin/project validation, role/CA checks and native Git credential isolation |
@@ -448,8 +454,7 @@ Generic modules have the following deliberate Source-specific boundaries:
 | `tests/panel-settings.spec.tsx`, `panel-prompts.spec.tsx`, `panel-deployment.spec.tsx`, `panel-panel.spec.tsx` | The settings groups, drafts and history, the prompts, the Deployment page, and the panel's search, glossary and route memory |
 | `tests/draft.spec.ts`, `tests/prompt-config.spec.ts`, `tests/markdown.spec.ts`, `tests/marks.spec.ts` | Draft states, merges and the save bar's line; the prompt configuration by section and the line diff; the Markdown subset and its links; the mark of every state the views classify |
 | `tests/locales.spec.ts`, `tests/styles.spec.ts` | The copy in both languages, the stylesheet |
-| `tests/class-docs.spec.ts` | Every class in `src` has a JSDoc block before it |
-| `tests/docs.spec.ts` | Numbered documents link only to earlier ones, every local link resolves, no document has merge conflict markers, and this document's tables list every module and every test |
+| `tests/docs.spec.ts` | Local documentation links resolve and documents contain no merge conflict markers |
 
 `tests/fixtures/` holds what several tests share: `host.ts`, a simulated DeepSeek Harness host; `panel-server.ts` and `panel.tsx`, the fake management API and the panel around a page; `deployment.ts`, a resolved deployment; `git.ts`, the environment of every git the tests start, which names no repository; and `async.ts`.
 

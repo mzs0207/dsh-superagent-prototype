@@ -281,25 +281,41 @@ describe('assessment outcomes', () => {
     return { ...parsed, eval: { ...parsed.eval, mode } }
   }
   const direction = { implementation_requested: true, target_basis: 'specified', requires_design_decision: false, evidence: 'asked' }
-  const judged = (current: ReturnType<typeof settings>, matched: boolean) =>
+  const judged = (current: Settings, matched: boolean) =>
     current.policy.rules.filter(rule => rule.enabled).map(rule => ({ rule_id: rule.id, matched, reason: 'judged' }))
-  const accept = (current: ReturnType<typeof settings>, matched = true) => ({ decision: 'accept' as const, rule_assessments: judged(current, matched),
+  const accept = (current: Settings, matched = true) => ({ decision: 'accept' as const, rule_assessments: judged(current, matched),
     direction, title: 'Fix', scope: 'small', reason: 'asked', intent_evidence: 'quote', worktree_name: 'fix-copy' })
+  it('automates only the opted-in source while other inferred requests remain observations', () => {
+    const current = SettingsSchema.parse({ eval: { mode: 'observe' }, policy: { sources: { zentao: { mode: 'auto', allowed: [] } } } })
+    const outcome = assessmentOutcome(accept(current), current, 'inferred', 'zentao')
+    expect(outcome.kind).toBe('accept')
+    expect(assessmentOutcome(accept(current), current, 'inferred', 'feishu').kind).toBe('ignore')
+    const rules = current.policy.rules.filter(rule => rule.enabled).map(rule => rule.id)
+    const scoped = settingsPolicy(current, { scope: () => ({ listened: true, observed: true }) })
+    expect(scoped.admitsInferred(rules, 'zentao')).toBe(true)
+    expect(scoped.admitsInferred(rules, 'gitlab')).toBe(false)
+  })
+  it('keeps global off as a stop for all inferred work even when one source opted into auto', () => {
+    const current = SettingsSchema.parse({ eval: { mode: 'off' }, policy: { sources: { zentao: { mode: 'auto', allowed: [] } } } })
+    const rules = current.policy.rules.filter(rule => rule.enabled).map(rule => rule.id)
+    expect(settingsPolicy(current, { scope: () => ({ listened: true, observed: true }) }).admitsInferred(rules, 'zentao')).toBe(false)
+    expect(assessmentOutcome(accept(current), current, 'inferred', 'zentao').kind).toBe('ignore')
+  })
   it('accepts an inferred candidate on its matched rules in auto mode only, and the Policy admits only enabled matched rules', () => {
     const auto = settings('auto')
-    const outcome = assessmentOutcome(accept(auto), auto, 'inferred')
+    const outcome = assessmentOutcome(accept(auto), auto, 'inferred', 'feishu')
     expect(outcome).toMatchObject({ kind: 'accept', rules: auto.policy.rules.filter(rule => rule.enabled).map(rule => rule.id), name: 'fix-copy' })
-    expect(assessmentOutcome(accept(settings('observe')), settings('observe'), 'inferred'))
+    expect(assessmentOutcome(accept(settings('observe')), settings('observe'), 'inferred', 'feishu'))
       .toMatchObject({ kind: 'ignore', reason: { code: 'observed', values: { text: 'asked' } }, audit: { would_accept: true } })
-    expect(assessmentOutcome(accept(auto, false), auto, 'inferred')).toMatchObject({ kind: 'ignore', reason: { code: 'noRuleMatched' } })
-    expect(() => assessmentOutcome({ ...accept(auto), rule_assessments: [] }, auto, 'inferred')).toThrow('Exactly one assessment for every enabled rule')
-    expect(() => assessmentOutcome({ ...accept(auto), intent_evidence: null }, auto, 'inferred')).toThrow('Acceptance requires intent_evidence')
+    expect(assessmentOutcome(accept(auto, false), auto, 'inferred', 'feishu')).toMatchObject({ kind: 'ignore', reason: { code: 'noRuleMatched' } })
+    expect(() => assessmentOutcome({ ...accept(auto), rule_assessments: [] }, auto, 'inferred', 'feishu')).toThrow('Exactly one assessment for every enabled rule')
+    expect(() => assessmentOutcome({ ...accept(auto), intent_evidence: null }, auto, 'inferred', 'feishu')).toThrow('Acceptance requires intent_evidence')
     const scope = { scope: () => ({ listened: true as const, observed: true }) }
     const enabled = auto.policy.rules.find(rule => rule.enabled)!.id
-    expect(settingsPolicy(auto, scope).admitsInferred([enabled])).toBe(true)
-    expect(settingsPolicy(auto, scope).admitsInferred(['unknown'])).toBe(false)
-    expect(settingsPolicy(auto, scope).admitsInferred([])).toBe(false)
-    expect(settingsPolicy(settings('observe'), scope).admitsInferred([enabled])).toBe(false)
+    expect(settingsPolicy(auto, scope).admitsInferred([enabled], 'feishu')).toBe(true)
+    expect(settingsPolicy(auto, scope).admitsInferred(['unknown'], 'feishu')).toBe(false)
+    expect(settingsPolicy(auto, scope).admitsInferred([], 'feishu')).toBe(false)
+    expect(settingsPolicy(settings('observe'), scope).admitsInferred([enabled], 'feishu')).toBe(false)
   })
 })
 
@@ -320,8 +336,8 @@ describe('admission table settings', () => {
       rule_assessments: rules.map((rule, index) => ({ rule_id: rule.id, matched: index === 0, reason: 'judged' })) }
     for (const mode of ['observe', 'off'] as const) {
       const settings = SettingsSchema.parse({ eval: { mode } })
-      expect(assessmentOutcome(assessment, settings, 'explicit')).toMatchObject({ kind: 'accept', title: 'Fix' })
-      expect(assessmentOutcome(assessment, settings, 'inferred')).toMatchObject({ kind: 'ignore', reason: { code: 'observed' } })
+      expect(assessmentOutcome(assessment, settings, 'explicit', 'feishu')).toMatchObject({ kind: 'accept', title: 'Fix' })
+      expect(assessmentOutcome(assessment, settings, 'inferred', 'feishu')).toMatchObject({ kind: 'ignore', reason: { code: 'observed' } })
     }
   })
   it('admits a listed bot that mentions the agent where the Source does not observe its messages, as a listed person\'s mention needs none', () => {
@@ -339,9 +355,9 @@ describe('rule judgements', () => {
     const direction = { implementation_requested: true, target_basis: 'specified', requires_design_decision: false, evidence: 'asked' }
     const assessment = { decision: 'accept' as const, direction, title: 'Fix', scope: 'small', reason: 'asked', intent_evidence: 'quote',
       rule_assessments: [{ rule_id: 'copy', matched: true, reason: 'typo' }, { rule_id: 'copy', matched: false, reason: 'again' }] }
-    expect(() => assessmentOutcome(assessment, parsed, 'inferred')).toThrow('Exactly one assessment for every enabled rule')
+    expect(() => assessmentOutcome(assessment, parsed, 'inferred', 'feishu')).toThrow('Exactly one assessment for every enabled rule')
     const once = { ...assessment, rule_assessments: [assessment.rule_assessments[0]!, { rule_id: 'visual', matched: false, reason: 'no colors' }] }
-    expect(assessmentOutcome(once, parsed, 'inferred')).toMatchObject({ kind: 'accept', rules: ['copy'] })
+    expect(assessmentOutcome(once, parsed, 'inferred', 'feishu')).toMatchObject({ kind: 'accept', rules: ['copy'] })
   })
 })
 describe('policy effects', () => {

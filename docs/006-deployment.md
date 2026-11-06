@@ -104,7 +104,40 @@ With the Source on, new Issue/MR mentions, project note events and subscribed di
 
 Issue `#7` and MR `!7` are different Threads. GitLab keys include a hash of provider, origin and configured project path, preventing collisions across hosts/projects. Rename/retarget a project deliberately; it receives a new namespace. Native Git credentials are selected only for the configured origin; SSH fallback is disabled for GitLab. Only that intranet host is added to `NO_PROXY`; external model proxies remain configured.
 
-An MR created by the agent from `agent/$DSH_SUPERAGENT_NAME`, or the originating MR, can bind through `orchestrator_report` using the existing `pr_number` field for its project-local IID. Merge/closure ends the ticket and notifies its source conversation. People merge GitLab MRs; GitHub auto-merge/reviewer-credit rewriting does not apply.
+An MR created by the agent from `agent/$DSH_SUPERAGENT_NAME`, or the originating MR, can bind through `orchestrator_report` using the existing `pr_number` field for its project-local IID. Merge/closure ends ordinary tickets and notifies their source conversations. People merge GitLab MRs except for explicitly enabled ZenTao bug workflows below; GitHub auto-merge/reviewer-credit rewriting does not apply.
+
+### ZenTao assigned bugs (optional)
+
+Enable **Settings → Sources → 禅道 / ZenTao** only after authorizing the complete workflow. It polls every 60 seconds, including existing assigned active bugs on first enablement. It uses native OpenAPI token reads and session-authenticated `action-comment-bug-<id>.json` writes; no public webhook or browser process is needed.
+
+Create a local JSON credentials file, readable by the service account, containing `{"account":"<login>","password":"<password>"}`. Keep it outside this repository and use mode `0600`. The Source stores its path, not the password; neither tokens nor passwords enter tickets or model environment variables.
+
+```json
+{
+  "enabled": true,
+  "config": {
+    "baseUrl": "http://zentao.internal:8080/zentao",
+    "product": 4,
+    "account": "<login>",
+    "credentialsFile": "/home/me/.dsh/state/superagent/zentao-credentials.json",
+    "repository": "http://gitlab.internal/group/project",
+    "testApi": "https://test.example.com/api",
+    "pollSeconds": 60
+  }
+}
+```
+
+`repository` must equal the selected Executor's repository web URL. Each Source covers one product/account/repository mapping. The poller reads **unclosed**, then filters exact product, assignee, `active`, and not-deleted; some ZenTao installations treat `status=active` as an unsupported browse mode and return an empty list. Event IDs include installation/product/account/repository, bug ID and activation count, not edit timestamps. Own comments, repeated polls and restarts do not create another ticket.
+
+Add a Policy rule authorizing diagnosis and repair of this Source's assigned bugs, set **Policy → ZenTao execution mode** (`policy.sources.zentao.mode`) to `auto`, and set `policy.sources.zentao.admission.bugs.unlistedUnaddressed` to `inferred`. Keep the global `eval.mode` and unrelated rules unchanged: other Sources continue inheriting their existing mode. Source mode `inherit` restores the global default; global `off` still disables all inferred work, including ZenTao. Assignment events are system events, never forged human requests. The team's Delivery requirements must include the scoped ZenTao exception in the bundled defaults; older customized delivery text needs that exception added explicitly.
+
+The worker uses `orchestrator_zentao`: read the bug/images, reproduce against the configured test environment, record a clean tested HEAD, merge its own pinned MR to **develop**, cherry-pick only that MR change into a separate test worktree, test it there, then publish **test** with a normal fast-forward push. A persisted Git checkpoint rejects amended or unrelated test worktrees. Changed-service coverage and shared-runtime changes are checked before publishing.
+
+The bundled `release.py` uses the business repository's `scripts/jenkins_build.py` and local `~/.claude/jenkins-config.json`, only for `web-community-backend-pipeline`, branch `test`, `DEPLOY=true`. Service names come from that script's allowlist. Builds/queue IDs are checkpointed; an interrupted request with an unknown outcome is not automatically triggered again.
+
+**Branch-based deployment limitation:** the existing Jenkins job checks out the latest `test`, not an immutable SHA. Another writer can advance it while a build is queued. This integration does not modify that shared pipeline. It checks the branch before triggering and compares Jenkins's actual checkout SHA afterward; a mismatch pauses the bug, but cannot undo an already-performed deployment. The bug is marked `fixed` only after matching successful builds and a fresh test-environment verification. The ZenTao resolved-build value must be a numeric ZenTao build ID, not a Jenkins build number.
+
+MR merge does not finish this workflow. A nonexistent, unreproducible or unsolvable bug, failed test, conflict, missing permission or deployment failure must report **blocked**, which queues an evidence note and pauses that ticket. A pending note is shown as pending, not claimed delivered; the outbox retries delivery without restarting code work. Incoming comments/CI and service restarts cannot resume it. Use the panel's **Retry** only after addressing the blocker; inspect persisted checkpoints first, and never repeat a successful merge/push/build. The workflow does not close bugs, reassign them, or mark them postponed merely to add a note.
 
 ### Feishu bot (optional)
 
@@ -250,7 +283,7 @@ Health entries are grouped by responsibility:
 | `evals` | Unavailable Evals from the last hour with no later judgement or dismissal |
 | `assessment`, `launch`, `delivery`, `relay`, `notice`, `reply` | Stored work described in [003 Execution](003-execution.md); delivery counts waiting work, while reply covers Channel messages |
 | `worker` | Executor Session event handling; appears after its first failure |
-| `github`, `gitlab`, `feishu`, `history` | Source polling, events and history recovery |
+| `github`, `gitlab`, `zentao`, `feishu`, `history` | Source polling, events and history recovery |
 | `sync:<source id>` | Allowed-list synchronization |
 
 A refusal has a status and `error`, its English text:
@@ -264,6 +297,7 @@ The blocks:
 
 - `source:github`, `source:feishu`: `{"enabled": true, "config": {…}}`. GitHub's config has `repository` and `cli`, and the switches `observeIssues`, `observePulls`, `observeComments` and `observeCi`, off by default, which receive every new Issue, new pull request and comment in the repository and the default branch's CI; Feishu's has `cli`, `chats` as `[{"chatId": "oc_…", "name": "…", "listen": "mentions"}]` (or `"all"`), `directMessages`, and `otherChats` as `"none"` or `"mentions"`.
 - `source:gitlab`: the GitLab object above; `enabled` defaults to false. It supports `observeMergeRequests`, not GitHub's `observePulls`. Add its allowed users/bots/admission rules under `policy.sources.gitlab`.
+- `source:zentao`: the ZenTao object above, off by default. `policy.sources.zentao.mode` enables only its automatic workflow without changing other Sources' global observation mode.
 - `policy`: `{"rules": […], "sources": {"github": {"allowed": [{"id": "<login>"}], "bots": [{"id": "dependabot[bot]"}]}, "feishu": {"allowed": [{"id": "ou_…", "name": "…"}], "syncChat": "oc_…", "admission": {"oc_…": {"unlistedAddressed": "explicit"}}}}}`. `bots` lists the bots whose messages may become inferred candidates. An `admission` row is keyed by chat id, `other` or `direct` for Feishu, and by `issues`, `pulls`, `comments` or `ci` for GitHub; an unset cell takes its default (see [002 Authorization](002-authorization.md)).
 - `eval`: `mode`, `timeoutSeconds` and `model`.
 - `executor`: `repositoryProvider` (`auto` by default, or explicit `github`/`gitlab`), `model`, `maxWorkers`, `directory`, `prepare` and `blockedCommands`. Processing pause is separate (`POST executor/pause`).

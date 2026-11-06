@@ -8,7 +8,7 @@ Workers capture and verify the comparison; the orchestrator checks the reported 
 
 For GitLab ($DSH_SUPERAGENT_REPOSITORY_PROVIDER=gitlab), use glab and $DSH_SUPERAGENT_REPOSITORY_URL, never mirror company code to GitHub.
 Use the actual target branch; immediately report a new/adopted MR IID with pr_number.
-People merge every GitLab MR: no self-approval or auto-merge. Preserve private source audiences.
+People merge GitLab MRs unless the ticket originates from an explicitly enabled ZenTao bug workflow: only that worker's dedicated guarded tools may merge its verified MR to develop and publish that fix alone to test, as the dsh-superagent-zentao skill requires. Never self-approve or bypass server approvals. Other sources have no automatic-merge exception. Preserve private source audiences.
 The remaining merge, credit-rewriting and duplicate-PR instructions apply only to GitHub.
 
 Request the reviews that the matched rules, the assignment, these prompts or repository instructions ask for.

@@ -38,7 +38,7 @@ export interface Assessment {
  * inferred candidate only in `auto` mode (otherwise recording it as `would_accept`).
  * @throws when `rule_assessments` does not cover every enabled rule exactly once, or an accept omits `intent_evidence`.
  */
-export function assessmentOutcome(assessment: Assessment, settings: Pick<Settings, 'policy' | 'eval'>, strength: Strength): AssessmentOutcome {
+export function assessmentOutcome(assessment: Assessment, settings: Pick<Settings, 'policy' | 'eval'>, strength: Strength, source: string): AssessmentOutcome {
   const enabled = settings.policy.rules.filter(rule => rule.enabled)
   const judged = assessment.rule_assessments
   const ids = new Set(judged.map(item => item.rule_id))
@@ -53,7 +53,7 @@ export function assessmentOutcome(assessment: Assessment, settings: Pick<Setting
   if (!matches.length) return { kind: 'ignore', audit, reason: { code: 'noRuleMatched' } }
   if (!assessment.intent_evidence) throw new Error('Acceptance requires intent_evidence')
   const { title, scope, worktree_name: name } = assessment
-  if (strength === 'inferred' && settings.eval.mode !== 'auto') {
+  if (strength === 'inferred' && acceptMode(settings, source) !== 'auto') {
     const proposal = { title, scope, worktree_name: name }
     return { kind: 'ignore', audit: { ...audit, would_accept: true, proposal }, reason: { code: 'observed', values: { text: assessment.reason } } }
   }
@@ -75,7 +75,9 @@ export const AllowedSchema = z.object({ id: z.string().trim().min(1).max(200), n
 const Weak = z.enum(['inferred', 'ignore'])
 export const AdmissionRowSchema: z.ZodType<AdmissionRow> = z.object({ listedUnaddressed: Weak.optional(), unlistedAddressed: z.enum(['explicit', 'inferred', 'ignore']).optional(), unlistedUnaddressed: Weak.optional() }).strict()
 export const AdmissionTableSchema = z.record(z.string(), AdmissionRowSchema)
-export const SourcePolicySchema = z.object({ allowed: z.array(AllowedSchema).default([]), admission: AdmissionTableSchema.default({}) }).catchall(z.unknown())
+export const SourceModeSchema = z.enum(['inherit', 'off', 'observe', 'auto'])
+export const SourcePolicySchema = z.object({ allowed: z.array(AllowedSchema).default([]), admission: AdmissionTableSchema.default({}),
+  mode: SourceModeSchema.optional() }).catchall(z.unknown())
 export type SourcePolicy = z.infer<typeof SourcePolicySchema>
 export const PolicyConfigSchema = z.object({
   rules: z.array(RuleSchema).refine(rules => new Set(rules.map(rule => rule.id)).size === rules.length, 'Duplicate rule IDs').default(DEFAULT_RULES),
@@ -106,6 +108,12 @@ export const SettingsSchema = z.object({
   executor: ExecutorConfigSchema.default(() => ExecutorConfigSchema.parse({})),
 }).strict()
 export type Settings = z.infer<typeof SettingsSchema>
+/** A Source may opt into automation without enabling proactive execution for every other Source. */
+export function acceptMode(settings: Pick<Settings, 'policy' | 'eval'>, source: string): Settings['eval']['mode'] {
+  if (settings.eval.mode === 'off') return 'off'
+  const mode = settings.policy.sources[source]?.mode
+  return mode && mode !== 'inherit' ? mode : settings.eval.mode
+}
 export type SettingsBlock = 'policy' | 'eval' | 'executor' | `source:${string}`
 export type SettingsSave = SettingsBlock | 'pause'
 export type SettingsOrigin = 'panel' | 'tool' | 'sync'
@@ -176,10 +184,12 @@ export function policyEffects(tickets: readonly Ticket[], old: Settings, now: Se
     const effect: PolicyEffect = rules.length ? { rules } : {}
     if (before.revalidate(ticket.mandate) && !after.revalidate(ticket.mandate)) {
       // With the previous accept mode and rules, the Mandate holds unless the sender or receiving scope lost authorization.
-      const asBefore = { ...now, eval: old.eval, policy: { ...now.policy, rules: old.policy.rules } }
+      const source = ticket.mandate.actor.source
+      const asBefore: Settings = { ...now, eval: old.eval, policy: { ...now.policy, rules: old.policy.rules, sources: { ...now.policy.sources,
+        [source]: { ...(now.policy.sources[source] ?? SourcePolicySchema.parse({})), mode: old.policy.sources[source]?.mode ?? 'inherit' } } } }
       if (!settingsPolicy(asBefore, scope(now)).revalidate(ticket.mandate)) {
         Object.assign(effect, { requesterAllowed: false, requester: ticket.mandate.actor })
-      } else if (ticket.mandate.strength === 'inferred' && old.eval.mode === 'auto' && now.eval.mode !== 'auto') effect.proactive = false
+      } else if (ticket.mandate.strength === 'inferred' && acceptMode(old, source) === 'auto' && acceptMode(now, source) !== 'auto') effect.proactive = false
     }
     if (Object.keys(effect).length) effects.set(ticket.id, effect)
   }
@@ -188,9 +198,9 @@ export function policyEffects(tickets: readonly Ticket[], old: Settings, now: Se
 /** Build the active Policy for gating incoming Triggers and revalidating existing Ticket Mandates. */
 export function settingsPolicy(settings: Settings, sources: SourceScope): Policy {
   const version = policyVersion(settings)
-  const mode = settings.eval.mode
   /** Gate non-human triggers: only listed bots (as inferred candidates) and senderless system/CI events may pass; other bots are rejected. */
   const machineGate = (trigger: Trigger): GateResult => {
+    const mode = acceptMode(settings, trigger.source)
     const bot = trigger.actor.id ? listedBot(settings, trigger.actor) : undefined
     if (trigger.actor.id && !bot) return { admissible: false, reason: 'not_human' }
     const scope = listened(sources, trigger.source, trigger.meta)
@@ -211,6 +221,7 @@ export function settingsPolicy(settings: Settings, sources: SourceScope): Policy
   return {
     version, paused: settings.paused, evalTimeoutMs: settings.eval.timeoutSeconds * 1000,
     gate(trigger: Trigger, thread, tickets) {
+      const mode = acceptMode(settings, trigger.source)
       if (!trigger.human) return machineGate(trigger)
       const allowed = allowedSender(settings, trigger.actor)
       const scope = listened(sources, trigger.source, trigger.meta)
@@ -231,8 +242,9 @@ export function settingsPolicy(settings: Settings, sources: SourceScope): Policy
       if (admission === 'inferred' && mode !== 'off') return { admissible: true, strength: 'inferred', basis: { ...basis, observation: { mode } } }
       return { admissible: false, reason: !allowed ? 'not_a_member' : receivable && admission === 'ignore' ? 'admission_ignored' : 'no_mention' }
     },
-    admitsInferred: rules => mode === 'auto' && rules.length > 0 && rules.every(id => settings.policy.rules.some(rule => rule.enabled && rule.id === id)),
+    admitsInferred: (rules, source) => acceptMode(settings, source) === 'auto' && rules.length > 0 && rules.every(id => settings.policy.rules.some(rule => rule.enabled && rule.id === id)),
     revalidate(mandate: Mandate) {
+      const mode = acceptMode(settings, mandate.actor.source)
       // Revalidation rules follow docs/002 (Eval path; Resume revalidates).
       const { basis } = mandate
       const { source } = basis

@@ -236,7 +236,9 @@ export class DshExecutor implements Executor {
   }
   /** Populates a newly accepted ticket's `execution` attributes (worktree name, workspace directory, and assignment text). */
   prepare(ticket: Ticket, outcome: Extract<AssessmentOutcome, { kind: 'accept' }>): Ticket {
-    return { ...ticket, execution: ticketExecution(ticket, outcome, this.host.store.settings(), this.host.machine.stateDir) }
+    const source = this.host.store.triggers.get(ticket.origin.triggerId)
+    return { ...ticket, ...(source?.source === 'zentao' ? { completion: 'report' as const, resume: 'manual' as const } : {}),
+      execution: ticketExecution(ticket, outcome, this.host.store.settings(), this.host.machine.stateDir) }
   }
   /**
    * Runs the configured `executor.prepare` command for a new ticket workspace in its parent directory with the ticket's

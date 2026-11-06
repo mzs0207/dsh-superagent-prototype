@@ -8,6 +8,8 @@ dsh-superagent is a proactive coding agent for one GitHub or self-managed GitLab
 
 Repository hosting defaults to **Automatic**: configure GitHub **or** GitLab, not both. When exactly one host has its repository and agent CLI configured (plus GitLab's host URL), setup uses it. If both are configured, choose one explicitly under **Settings → Execution**. Authentication failure never silently changes the target repository.
 
+Optional [ZenTao intake](docs/006-deployment.md#zentao-assigned-bugs-optional) handles assigned bugs through reproduction, verified repair, a `develop` MR merge, fix-only cherry-pick to `test`, Jenkins deployment and live verification. Blocked or nonexistent bugs receive an evidence note and remain paused until an operator retries. Other Sources retain their existing merge policy.
+
 It is also a way of working with an agent: **take as little human attention as possible, and give as much value as possible.** An agent that can act for a whole team can also waste a whole team's attention, so it acts only when asked or when a rule the team wrote allows it, and speaks only when someone must act or can use a result. [docs/000-philosophy.md](docs/000-philosophy.md) explains the principle and what it asks of the operator.
 
 ## Setup

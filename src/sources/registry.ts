@@ -2,7 +2,7 @@
 import type { ChannelRef, OutboundMessage, ScopeResult, SourceScope, Trigger } from '../core/index.ts'
 import type { Commands } from '../infra/commands.ts'
 import { HealthBoard, type HealthEntry } from '../infra/health.ts'
-import { AdmissionTableSchema, selectRepositoryProvider, type Settings } from '../policy.ts'
+import { AdmissionTableSchema, SourceModeSchema, selectRepositoryProvider, type Settings } from '../policy.ts'
 import type { ChannelLink, ChannelLinks, SourceInstance, SourceKind, TriggerContext, VariableSpec } from './kind.ts'
 
 
@@ -60,17 +60,20 @@ export class SourceRegistry implements SourceScope {
   validatePolicy(parts: Record<string, Record<string, unknown>>): Record<string, Record<string, unknown> & { allowed: { id: string; name?: string }[] }> {
     return Object.fromEntries(Object.entries(parts).map(([id, part]) => {
       const policy = this.kinds.get(id)?.policy
-      // `admission` is validated by the Policy's own schema (shared across all kinds), while the kind validates the rest of its part.
-      const { admission, ...rest } = part
-      return [id, policy ? { ...policy.schema.parse(rest), admission: AdmissionTableSchema.parse(admission ?? {}) } : part as Record<string, unknown> & { allowed: { id: string; name?: string }[] }]
+      // Admission and optional accept mode are shared; the kind validates its own account/scope fields.
+      const { admission, mode, ...rest } = part
+      return [id, policy ? { ...policy.schema.parse(rest), admission: AdmissionTableSchema.parse(admission ?? {}),
+        ...(mode === undefined ? {} : { mode: SourceModeSchema.parse(mode) }) } : part as Record<string, unknown> & { allowed: { id: string; name?: string }[] }]
     }))
   }
   policyPart(id: string, settings = this.settings()) {
     const policy = this.kinds.get(id)?.policy
     if (!policy) return undefined
-    const { admission, ...rest } = settings.policy.sources[id] ?? {}
+    const { admission, mode, ...rest } = settings.policy.sources[id] ?? {}
     const parsed = policy.schema.safeParse(rest)
-    return { ...parsed.success ? parsed.data : policy.schema.parse({}), admission: AdmissionTableSchema.safeParse(admission ?? {}).data ?? {} }
+    return { ...parsed.success ? parsed.data : policy.schema.parse({}),
+      ...(mode !== undefined || policy.fields.some(field => field.key === 'mode') ? { mode: SourceModeSchema.safeParse(mode).data ?? 'inherit' } : {}),
+      admission: AdmissionTableSchema.safeParse(admission ?? {}).data ?? {} }
   }
   channelAllowed(channel: { source: string; address: Record<string, string> }, settings = this.settings()): boolean {
     const kind = this.kinds.get(channel.source)
@@ -95,7 +98,7 @@ export class SourceRegistry implements SourceScope {
   async send(message: OutboundMessage, commands: Commands): Promise<'sent' | 'gone' | 'waiting'> {
     const kind = this.kinds.get(message.channel.source)
     if (!kind) return 'waiting'
-    return kind.channel ? kind.channel.send({ commands }, message) : 'gone'
+    return kind.channel ? kind.channel.send({ commands }, message, this.resolve(kind, this.settings().sources[kind.kind], this.settings()).config) : 'gone'
   }
   link(channel: ChannelRef, links: ChannelLinks): ChannelLink {
     const link = this.kinds.get(channel.source)?.channel?.link(channel.address, links)

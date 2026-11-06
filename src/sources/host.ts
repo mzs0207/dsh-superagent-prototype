@@ -54,6 +54,8 @@ export interface SourceContext {
     get(id: string): Ticket | undefined
     /** Open tickets, newest first. */
     open(): Ticket[]
+    /** Persist a delivery failure as blocked; comments or service restarts must not clear it. */
+    block(id: string, summary: string): void
     /** Binds an open ticket to follow a Source Thread (`own` when opened by the ticket) so the Thread's close, not a ready report, ends the ticket. */
     bindThread(id: string, thread: ThreadRef, own: boolean): void
     /** Reports that a followed Thread closed at `at`; each open ticket following it ends once no `own` Thread remains open and no resumed work is still running. */

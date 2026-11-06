@@ -82,7 +82,7 @@ export class Tickets extends EnginePart {
       follow.closed = { at, outcome }
       this.repo.tickets.save(ticket)
       const done = this.followsDone(ticket)
-      if (!done || this.unfinished(ticket, at)) continue
+      if (!done || ticket.completion === 'report' || this.unfinished(ticket, at)) continue
       // Work resumed after the close and finished ends now.
       const resumed = Date.parse(latestAssignment(ticket)?.createdAt ?? '') > Date.parse(at)
       this.end(ticket.id, 'executor', done.outcome, resumed ? this.now() : done.at)
@@ -234,8 +234,8 @@ export class Tickets extends EnginePart {
   addInput(ticket: Ticket, input: TicketInput): void {
     if (ticket.inputs.some(existing => existing.id === input.id)) return
     ticket.inputs.push(input); ticket.updatedAt = this.now()
-    // Hold back automated inputs while the worker is waiting on a person.
-    const held = liveTicket(ticket) && automatic(input) && waitsForPerson(ticket)
+    // Some delivery workflows require an explicit retry even when a person comments on their MR.
+    const held = liveTicket(ticket) && (automatic(input) || ticket.resume === 'manual') && waitsForPerson(ticket)
     if (!held) ticket.undelivered.push(input.id)
     this.repo.tickets.save(ticket)
     if (!liveTicket(ticket) || held) return

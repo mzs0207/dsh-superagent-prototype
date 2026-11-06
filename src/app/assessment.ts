@@ -3,7 +3,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { z } from 'zod'
 import { reasonText, threadKey, type Assessor, type AssessmentOutcome, type Candidate, type EngineForMainSession,
   type Trigger } from '../core/index.ts'
-import { AdmissionDirectionSchema, RuleAssessmentSchema, assessmentOutcome, directionAllowed, type Settings } from '../policy.ts'
+import { AdmissionDirectionSchema, RuleAssessmentSchema, acceptMode, assessmentOutcome, directionAllowed, type Settings } from '../policy.ts'
 import { checkedImText } from '../infra/text.ts'
 import type { Commands } from '../infra/commands.ts'
 import type { Deployment } from '../deployment.ts'
@@ -206,7 +206,7 @@ export class MasterAssessor implements Assessor {
     })() : { error: error ?? 'Call orchestrator_eval to load initial context', complete: false }
     const settings = this.host.settings()
     const others = candidate.triggers.filter(item => item.id !== trigger.id)
-    return { trigger_id: trigger.id, strength: candidate.strength, mode: settings.eval.mode,
+    return { trigger_id: trigger.id, strength: candidate.strength, mode: acceptMode(settings, trigger.source),
       source: { kind: trigger.source, actor: trigger.actor.id, thread: threadKey(trigger.threads[0]!), ...(trigger.url
         ? { url: trigger.url } : {}) },
       ...cut(trigger.text, TRIGGER_CHARS), ...imageIds(source?.messageId ?? '', trigger.text),
@@ -270,9 +270,9 @@ export class MasterAssessor implements Assessor {
   }
   /** Converts the assessment into an outcome under current settings and passes it to `Engine.decide` for policy verification. */
   async decide(triggerId: string, result: z.infer<typeof AssessmentSchema>, signal?: AbortSignal): Promise<{ state: string; ticket_id?: string; reason: string }> {
-    const { candidate } = this.evalFor(triggerId)
+    const { candidate, trigger } = this.evalFor(triggerId)
     signal?.throwIfAborted()
-    let outcome: AssessmentOutcome = assessmentOutcome(result, this.host.settings(), candidate.strength)
+    let outcome: AssessmentOutcome = assessmentOutcome(result, this.host.settings(), candidate.strength, trigger.source)
     if (outcome.kind === 'accept' && outcome.acknowledgement) outcome = { ...outcome, acknowledgement: checkedImText(outcome.acknowledgement) }
     const decision = this.host.engine.decide(triggerId, { ...outcome, evalId: candidate.evalId })
     return { state: decision.kind, ...(decision.ticketId ? { ticket_id: decision.ticketId } : {}), reason: reasonText(decision.reason) }

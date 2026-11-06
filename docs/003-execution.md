@@ -81,13 +81,16 @@ These wrappers and directories establish defaults, not a security boundary. A wo
 
 ## Merging
 
-Auto-merge is governed by the **Delivery requirements** prompt. The host has no merge-specific decision logic.
+Ordinary auto-merge is governed by the **Delivery requirements** prompt. Enabled ZenTao bug workflows are a scoped exception: their dedicated worker tool verifies the MR owner, source branch, target `develop`, tested SHA and CI state before requesting a native merge; server approval rules still apply.
 
 By default, the Executor never enables auto-merge as the agent account: GitHub attributes the merge to whoever enabled it. Delivery requirements must name another account's CLI for merging. Without one, people merge the pull request.
 
 The default instructions allow auto-merge only for a pull request opened for the Ticket, when it is ready, the required approvals cover the head commit, and additions plus deletions total fewer than 200 lines. Before pushing another revision, the Executor withdraws auto-merge.
 
 Reviews without a body, such as approvals, also arrive as Triggers and can wake an Executor waiting for review. These instructions govern the agent, not GitHub's merge rules. To enforce approvals, require them in branch protection and dismiss stale approvals. Omit the merge CLI or remove the auto-merge paragraph to require manual merging.
+
+ZenTao workflows continue after MR merge through a fix-only cherry-pick to `test`, tests in that separate worktree, deployment and live verification. They use `completion: "report"` to prevent merge/closure from ending work early. Their `resume: "manual"` keeps comments and CI from waking a blocked ticket. A nonexistent or unresolved bug reports `blocked` with an evidence note, not the ordinary `dropped` path described below. Successful resolution does not automatically close the bug. See the [deployment contract](006-deployment.md#zentao-assigned-bugs-optional), including the branch-based Jenkins race limitation.
+
 
 ## How a Ticket ends
 

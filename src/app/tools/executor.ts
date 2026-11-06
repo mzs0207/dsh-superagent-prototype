@@ -10,6 +10,7 @@ import type { Store } from '../store.ts'
 import { reportRelay, threadFollowedNotice } from '../notices.ts'
 import type { Sessions } from '../sessions.ts'
 import { AcknowledgementSchema, readTool, tool, type Tool } from './tool.ts'
+import { guardZentaoReport, zentaoTools } from './zentao.ts'
 
 export interface ExecutorToolsHost {
   readonly engine: Pick<EngineForExecutor, 'report' | 'reply' | 'markUnrelated' | 'handback' | 'followForContext'>
@@ -24,6 +25,7 @@ export interface ExecutorToolsHost {
 export function executorTools(host: ExecutorToolsHost, ticket: Ticket): Tool[] {
   const ticketId = ticket.id
   return [
+    ...zentaoTools(host, ticket),
     readTool('Read one page of a resource of this ticket that the resource parameter lists. Follow next_offset, and next_resource where a page names one.',
       true, (resource, offset, limit, signal) => readResource(host.resources, resource, offset, limit, ticketId, signal)),
     tool({
@@ -90,10 +92,11 @@ export function executorTools(host: ExecutorToolsHost, ticket: Ticket): Tool[] {
           ? { provider: 'gitlab' as const, value: await readMergeRequest(host.repository, args.pr_number, signal) }
           : { provider: 'github' as const, value: await readPull(host.repository, args.pr_number, signal) }
         // Claim, report and relay atomically: a rejected claim must leave no partial state.
-        return host.store.atomic(() => {
+        const result = host.store.atomic(() => {
           const refused = change && (change.provider === 'gitlab'
             ? claimMergeRequest(host.repository, ticketId, change.value) : claimPull(host.repository, ticketId, change.value))
           if (refused) throw new Error(refused)
+          const zentaoNote = guardZentaoReport(host, current, args)
           const report = { state: args.state, summary: args.summary, ...(args.human_action !== undefined ? { question: args.human_action } : {}),
             ...(args.question_for_trigger_id ? { askedBy: args.question_for_trigger_id } : {}),
             ...(args.reply_to_trigger_id ? { answers: args.reply_to_trigger_id } : {}) }
@@ -101,8 +104,14 @@ export function executorTools(host: ExecutorToolsHost, ticket: Ticket): Tool[] {
           const relay = reportRelay(updated, report)
           if (relay) host.sessions.relay(relay.id, relay.text)
           const notification = relay ? 'orchestrator' : 'internal_only'
-          return { reported: true, notification, ...(updated.attention ? { attention: updated.attention } : {}) }
+          return { reported: true, notification, ...(updated.attention ? { attention: updated.attention } : {}),
+            ...(zentaoNote ? { zentao_note_id: zentaoNote } : {}) }
         })
+        if (result.zentao_note_id) {
+          await host.sendReplies()
+          return { ...result, zentao_note_status: host.store.replyStatus(result.zentao_note_id) ?? 'pending' }
+        }
+        return result
       },
     }),
   ]

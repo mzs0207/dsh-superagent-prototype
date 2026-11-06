@@ -1050,6 +1050,23 @@ describe('replies', () => {
   })
 })
 describe('ticket commands', () => {
+  it('keeps report-completed workflows open after merge and deployment failure until explicit verified completion', () => {
+    const h = harness({}, { prepareTicket: ticket => ({ ...ticket, completion: 'report', resume: 'manual' }) })
+    const ticketId = accepted(h).ticketId!
+    h.engine.bindThread(ticketId, { source: 'gh', id: 'pr-7' }, true)
+    h.engine.report(ticketId, { state: 'progress', summary: 'Starting deployment' })
+    h.engine.turnEnded(ticketId, runningAssignment(h.repo.tickets.get(ticketId)!)!.id)
+    h.engine.threadClosed({ source: 'gh', id: 'pr-7' }, 'merged', '2026-09-23T00:00:01Z')
+    expect(h.repo.tickets.get(ticketId)!.ended).toBeUndefined()
+    h.engine.report(ticketId, { state: 'blocked', summary: 'Deployment failed' })
+    expect(h.repo.tickets.get(ticketId)!.ended).toBeUndefined()
+    h.engine.receive(trigger('2', { threads: [{ source: 'gh', id: 'pr-7' }] }))
+    expect(h.repo.tickets.get(ticketId)!.undelivered).toEqual([])
+    h.engine.retryTicket(ticketId)
+    h.settle()
+    h.engine.report(ticketId, { state: 'ready', summary: 'Deployed and verified' })
+    expect(h.repo.tickets.get(ticketId)!.ended?.outcome).toBe('merged')
+  })
   it('ends a ticket by the same rule on a close and on a ready report: once no PR it opened is open, as the latest of them ended', () => {
     const h = harness()
     const ticketId = accepted(h).ticketId!
