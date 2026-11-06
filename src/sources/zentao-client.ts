@@ -26,6 +26,7 @@ export const ZentaoBugSchema = z.looseObject({
   files: z.unknown().optional(), openedBuild: z.unknown().optional(),
 })
 export type ZentaoBug = z.infer<typeof ZentaoBugSchema>
+/** Signals that a bug left the configured product or assignee scope, so pending channel writes must stop. */
 export class ZentaoScopeError extends Error {}
 
 export async function zentaoRequest(url: URL, options: { method?: string; body?: string; headers?: Record<string, string>; signal?: AbortSignal } = {}) {
@@ -50,6 +51,7 @@ export async function zentaoRequest(url: URL, options: { method?: string; body?:
   return promise
 }
 
+/** Authenticated ZenTao reads and scope-checked, idempotent comment/resolution writes with authoritative readback. */
 export class ZentaoClient {
   private token?: string
   constructor(readonly config: ZentaoConnection, private readonly signal?: AbortSignal) {}
