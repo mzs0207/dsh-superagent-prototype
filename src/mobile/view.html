@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<title>Superagent 任务</title>
+<link rel="stylesheet" href="/view.css">
+<script src="/view.js" defer></script>
+</head>
+<body>
+<header><div><span class="eyebrow">SUPERAGENT · 只读</span><h1>任务</h1></div><button id="refresh" type="button">刷新</button></header>
+<main>
+<div class="toolbar"><button id="back" type="button" hidden>返回列表</button><label id="filter-label">状态 <select id="filter" aria-label="任务状态"><option value="open">未结束</option><option value="working">执行中</option><option value="person">待处理</option><option value="idle">等待中</option><option value="ended">已结束</option></select></label></div>
+<div class="connection"><span id="connection" role="status">正在连接…</span><time id="updated"></time></div>
+<p id="error" role="alert" hidden></p>
+<section id="content" aria-label="任务内容" aria-busy="true"><p class="empty">正在读取任务…</p></section>
+<nav id="pagination" aria-label="分页" hidden><button id="previous" type="button">上一页</button><span id="count"></span><button id="next" type="button">下一页</button></nav>
+</main>
+<footer>任务由电脑执行 · 此处仅供查看</footer>
+</body>
+</html>

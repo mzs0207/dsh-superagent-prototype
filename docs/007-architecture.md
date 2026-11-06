@@ -404,6 +404,11 @@ Generic modules have the following deliberate Source-specific boundaries:
 | `src/client/marks.ts` | The marks of the states the views classify: a Ticket's or a Thread's stage, a Source's state and a Decision's outcome, each as a dot, an icon, a tone and a label |
 | `src/client/locales.ts` | All copy in both languages, and the glossary of [001 Domain model](001-domain.md) |
 | `src/client/client.css`, `css.d.ts` | The panel's stylesheet, loaded as text |
+| `src/mobile/gateway.ts` | Opt-in LAN HTTP listener: password login, bounded authentication, fixed loopback task reads, explicit response projections and no task mutations |
+| `src/mobile/cli.ts` | Private password-hash setup, password changes and foreground viewer lifecycle; leaves the DSH profile unchanged |
+| `src/mobile/view.html`, `view.js`, `view.css` | Touch task list/detail page, safe text rendering, filters/pagination and visibility-aware polling |
+| `src/mobile/login.html`, `login.js` | Password-only web login; no credentials in URLs or browser storage |
+| `apps/android/app/src/main/java/dev/dsh/superagent/viewer/MainActivity.java`, `ServerAddress.java` | Minimal Android WebView shell and strict private HTTP origin confinement |
 
 `src/sources/github.ts` and `src/sources/feishu.ts` are also the entries of the two Source plugins, built by `tsdown.config.ts` and exported in `package.json` as `./github-watch` and `./feishu-watch`. The bundle's `cordis.patch.yml` inserts the three plugins, with Feishu disabled.
 
@@ -439,6 +444,8 @@ Generic modules have the following deliberate Source-specific boundaries:
 | `tests/tools.spec.ts` | The Sessions' tools: what `orchestrator_read` reads for each role, and the shapes and checks of the other main Session tools |
 | `tests/runtime-concurrency.spec.ts` | Work that overlaps: Triggers during a pass, Tickets that change during deliveries and launches |
 | `tests/http.spec.ts` | The same-origin and loopback checks, the status of each kind of failure, the body limit, path parameters and queries |
+| `tests/mobile.spec.ts` | Real HTTP password login, session cookies, cross-origin/method/path restrictions, password body limits, explicit task fields and upstream failures |
+| `apps/android/app/src/test/java/dev/dsh/superagent/viewer/ServerAddressTest.java` | Private numeric HTTP addresses and same-origin confinement, including credential and prefix-confusion attacks |
 | `tests/settings.spec.ts` | Settings saves that race a model or account check, a Policy sync that a save outran, and the refusals of the pause, a sync and a block |
 | `tests/views.spec.ts` | What the management views derive from the Store, such as the Thread a dropped message belongs to |
 | `tests/timeline.spec.ts` | A Thread's pages and a Trigger's neighbours by time and then id, with every received Trigger's time in one form |

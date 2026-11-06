@@ -10,6 +10,8 @@ Repository hosting defaults to **Automatic**: configure GitHub **or** GitLab, no
 
 Optional [ZenTao intake](docs/006-deployment.md#zentao-assigned-bugs-optional) handles assigned bugs through reproduction, verified repair, a `develop` MR merge, fix-only cherry-pick to `test`, Jenkins deployment and live verification. Blocked or nonexistent bugs receive an evidence note and remain paused until an operator retries. Other Sources retain their existing merge policy.
 
+Optional [Android task viewer](docs/009-mobile.md): a small WebView app for task lists, progress and results on a trusted LAN. It uses a separate HTTP read-only gateway with one access password; no task controls, accounts, push notifications or tunnels.
+
 It is also a way of working with an agent: **take as little human attention as possible, and give as much value as possible.** An agent that can act for a whole team can also waste a whole team's attention, so it acts only when asked or when a rule the team wrote allows it, and speaks only when someone must act or can use a result. [docs/000-philosophy.md](docs/000-philosophy.md) explains the principle and what it asks of the operator.
 
 ## Setup
@@ -33,6 +35,7 @@ Read the numbered documents in order; each builds only on the ones before it.
 - [006 Deployment](docs/006-deployment.md): manual setup, configuration, upgrades and troubleshooting
 - [007 Architecture](docs/007-architecture.md)
 - [008 Cookbook](docs/008-cookbook.md): adding a Source
+- [009 Mobile task viewer](docs/009-mobile.md): Android APK, LAN HTTP and password setup
 
 ## Development
 
