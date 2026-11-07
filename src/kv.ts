@@ -55,8 +55,9 @@ export const KV = {
     thread: family<string, [thread: string]>('gitlab-thread:'),
     branch: family<string, [namespace: string]>('gitlab-branch:'),
     ci: family<{ fingerprint?: string; revision: number }, [namespace: string, target: string]>('gitlab-ci:') },
-  /** Verified revision and release checkpoints for one ZenTao ticket. */
-  zentao: { workflow: family<ZentaoWorkflow>('zentao-workflow:') },
+  /** Ticket checkpoints; Feishu roots and immutable creation requests scoped to bug, bot application and recipient. */
+  zentao: { workflow: family<ZentaoWorkflow>('zentao-workflow:'), feishuTopic: family<string>('zentao-feishu-topic:'),
+    feishuTopicStart: family<{ id: string; text: string }>('zentao-feishu-topic-start:') },
   /**
    * Feishu Source: known chats (`true` for direct messages); per-chat history cursor and active topics mapped from topic ID
    * to last-seen timestamp; and per-polled-thread seen message IDs and initialization flag.

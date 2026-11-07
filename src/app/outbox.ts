@@ -1,14 +1,18 @@
 /** Reliable outbound message delivery backed by persistent receipts and retried reply effects. */
-import type { OutboundMessage, Outbox as OutboxPort, ReplyStatus } from '../core/index.ts'
+import { z } from 'zod'
+import { key, type OutboundMessage, type Outbox as OutboxPort, type ReplyStatus } from '../core/index.ts'
 import type { Commands } from '../infra/commands.ts'
 import { checkedImText } from '../infra/text.ts'
 import type { SourceRegistry } from '../sources/registry.ts'
 import type { FeishuConfig } from '../sources/feishu.ts'
 import { FAILURES_BEFORE_ERROR, Later, type Effects } from './effects.ts'
 import type { Store } from './store.ts'
+import { KV } from '../kv.ts'
+
+const FeishuSentMessage = z.object({ message_id: z.string().min(1) })
 
 export interface OutboxHost {
-  readonly store: Pick<Store, 'atomic' | 'receipts'>
+  readonly store: Pick<Store, 'atomic' | 'receipts' | 'get' | 'set'>
   readonly effects: Pick<Effects, 'enqueue' | 'cancel' | 'handle' | 'idle'>
   readonly sources: Pick<SourceRegistry, 'instance' | 'channelAllowed' | 'send'>
   readonly commands: Commands
@@ -50,7 +54,24 @@ export class Outbox implements OutboxPort {
     if (feishu?.enabled && feishu.config.notificationOpenId) {
       const { bugId, url } = receipt.channel.address
       const text = `禅道 Bug #${bugId}\n${url}\n\n${receipt.text}`
-      await commands.lark(['im', '+messages-send', '--user-id', feishu.config.notificationOpenId, '--text', text, '--idempotency-key', receipt.id])
+      const topicScope = key(receipt.channel.thread, commands.deployment.feishu?.appId ?? '', feishu.config.notificationOpenId)
+      const topicKey = KV.zentao.feishuTopic(topicScope), startKey = KV.zentao.feishuTopicStart(topicScope)
+      let root = store.get(topicKey), start = store.get(startKey)
+      if (!root) {
+        // Keep one immutable creation request even if its response is lost or its receipt is withdrawn.
+        if (!start) { start = { id: receipt.id, text }; store.set(startKey, start) }
+        const sent = await commands.lark(['im', '+messages-send', '--user-id', feishu.config.notificationOpenId,
+          '--text', start.text, '--idempotency-key', start.id])
+        const confirmed = FeishuSentMessage.parse(sent).message_id, first = start.id === receipt.id
+        store.atomic(() => {
+          store.set(topicKey, confirmed)
+          if (first) store.receipts.settle(receipt, 'sent')
+        })
+        if (first) return
+        root = confirmed
+      }
+      if (start?.id !== receipt.id) await commands.lark(['im', '+messages-reply', '--message-id', root, '--text', text,
+        '--reply-in-thread', '--idempotency-key', receipt.id])
       store.receipts.settle(receipt, 'sent')
       return
     }

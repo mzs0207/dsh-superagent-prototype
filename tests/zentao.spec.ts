@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ZentaoClient } from '../src/sources/zentao-client.ts'
-import { pollZentao, zentaoKind, ZentaoConfigSchema } from '../src/sources/zentao.ts'
+import { pollZentao, zentaoKind, zentaoTrigger, ZentaoConfigSchema } from '../src/sources/zentao.ts'
 import { Store } from '../src/app/store.ts'
 import { SourceRegistry } from '../src/sources/registry.ts'
 import { sourceContextOf } from '../src/app/source-context.ts'
@@ -21,7 +21,7 @@ import { Effects } from '../src/app/effects.ts'
 import { HealthBoard } from '../src/infra/health.ts'
 
 interface FixtureBug extends Record<string, unknown> {
-  id: string; assignedTo: { account: string }; actions: { id: number; comment: string; actor: string }[]
+  id: string; assignedTo: string | { account: string } | null; actions: { id: number; comment: string; actor: string }[]
 }
 const bug = (id: number, overrides: Record<string, unknown> = {}): FixtureBug => ({ id: String(id), product: '4', title: `Bug ${id}`, status: 'active', deleted: false,
   assignedTo: { account: 'alice' }, activatedCount: '0', openedDate: '2026-11-01T08:00:00+08:00', steps: '<p>expected result</p>',
@@ -111,6 +111,15 @@ describe('Zentao intake', () => {
       expect(triggers.items.every(item => !item.human)).toBe(true)
     } finally { store.close() }
   })
+  it('skips null assignees without losing assigned active bugs on later pages', async () => {
+    rows = [bug(1, { status: 'resolved', assignedTo: null }), bug(2, { assignedTo: null }),
+      bug(3, { assignedTo: 'alice' }), bug(4)]
+    const { store, ctx } = context()
+    try {
+      await pollZentao(ctx)
+      expect(store.read.triggers({}).items.map(item => item.meta.bugId).sort()).toEqual([3, 4])
+    } finally { store.close() }
+  })
   it('does not create new work for its own comments, edits or a process restart', async () => {
     const first = context()
     await pollZentao(first.ctx)
@@ -142,6 +151,15 @@ describe('Zentao comment-only writes', () => {
     await expect(new ZentaoClient(config()).comment(1, 'op', 'blocked')).rejects.toThrow(/403/)
     expect(comments).toEqual([])
   })
+  it('refuses reading or writing a bug after its assignee becomes null', async () => {
+    rows[0]!.assignedTo = null
+    const client = new ZentaoClient(config())
+    await expect(client.bug(1)).rejects.toThrow('no longer assigned')
+    await expect(client.comment(1, 'unassigned-note', 'blocked')).rejects.toThrow('no longer assigned')
+    await expect(client.resolve(1, '82', 'unassigned-resolution', 'Verified')).rejects.toThrow('no longer active and assigned')
+    expect(requests.filter(path => path.startsWith('POST ') && !path.endsWith('/tokens'))).toEqual([])
+    expect(rows[0]).toMatchObject({ status: 'active', assignedTo: null, actions: [] })
+  })
   it('reconciles a successful resolution after the server reassigns the bug back to its reporter', async () => {
     await new ZentaoClient(config()).resolve(1, '82', 'resolved-ticket', 'Verified in test')
     await new ZentaoClient(config()).resolve(1, '82', 'resolved-ticket', 'Verified in test')
@@ -171,7 +189,7 @@ describe('Zentao workflow boundaries', () => {
     const host: ZentaoToolsHost = { store: value.store, repository: value.ctx, resources: { store: value.store } }
     return { ...value, host, ticket }
   }
-  function notifications(h: Awaited<ReturnType<typeof worker>>, enabled = true, notificationOpenId = 'ou_operator') {
+  function notifications(h: { store: Store }, enabled = true, notificationOpenId = 'ou_operator') {
     const settings = h.store.settings()
     h.store.saveSettings({ ...settings,
       sources: { ...settings.sources, feishu: { enabled, config: { notificationOpenId } } },
@@ -180,7 +198,7 @@ describe('Zentao workflow boundaries', () => {
   }
   it.each(['blocked', 'failed'] as const)('delivers %s evidence privately to the fixed operator, never as a bug comment', async state => {
     const h = await worker()
-    const sent = vi.spyOn(h.ctx.commands, 'lark').mockResolvedValue({})
+    const sent = vi.spyOn(h.ctx.commands, 'lark').mockResolvedValue({ message_id: 'om_first' })
     try {
       notifications(h)
       const report = { state, summary: `无法复现，请补充测试账号。\n${'已检查相关日志和接口。'.repeat(60)}` }
@@ -216,7 +234,7 @@ describe('Zentao workflow boundaries', () => {
   })
   it('retries a failed Feishu delivery without falling back to a comment or restarting the ticket', async () => {
     const h = await worker()
-    const sent = vi.spyOn(h.ctx.commands, 'lark').mockRejectedValueOnce(new Error('Feishu unavailable')).mockResolvedValue({})
+    const sent = vi.spyOn(h.ctx.commands, 'lark').mockRejectedValueOnce(new Error('Feishu unavailable')).mockResolvedValue({ message_id: 'om_first' })
     try {
       notifications(h)
       const report = { state: 'blocked' as const, summary: '合并冲突，需要人工处理。' }
@@ -235,7 +253,7 @@ describe('Zentao workflow boundaries', () => {
   })
   it('routes an already queued human-action reply through Feishu when notifications are enabled before delivery', async () => {
     const h = await worker()
-    const sent = vi.spyOn(h.ctx.commands, 'lark').mockResolvedValue({})
+    const sent = vi.spyOn(h.ctx.commands, 'lark').mockResolvedValue({ message_id: 'om_first' })
     try {
       h.engine.report(h.ticket.id, { state: 'blocked', summary: '缺少账号', question: '请提供测试账号。' })
       const reply = h.engine.reply({ purpose: 'attention', ticketId: h.ticket.id, question: '请提供测试账号。', text: '请提供测试账号。' })
@@ -244,6 +262,131 @@ describe('Zentao workflow boundaries', () => {
       expect(h.store.replyStatus(reply.id)).toBe('sent')
       expect(sent).toHaveBeenCalledExactlyOnceWith(['im', '+messages-send', '--user-id', 'ou_operator', '--text',
         expect.stringContaining('请提供测试账号。'), '--idempotency-key', reply.id])
+      expect(comments).toEqual([])
+    } finally { await h.effects.drain(); sent.mockRestore(); h.store.close() }
+  })
+  it('keeps the same bug topic across a process restart and a new ticket', async () => {
+    const h = await worker()
+    let active: ReturnType<typeof context> = h
+    const sent = vi.spyOn(Commands.prototype, 'lark').mockResolvedValue({ message_id: 'om_root' })
+    try {
+      notifications(active)
+      guardZentaoReport(h.host, h.ticket, { state: 'blocked', summary: 'Needs investigation' })
+      active.effects.start(); await active.outbox.sent()
+      await active.effects.drain(); active.store.close()
+      active = context()
+      notifications(active)
+      active.outbox.send({ id: 'retry-update', channel: h.ticket.channels[0]!, ticketId: 'new-ticket', kind: 'notice', text: 'New evidence' })
+      active.effects.start(); await active.outbox.sent()
+      expect(active.store.replyStatus('retry-update')).toBe('sent')
+      expect(sent).toHaveBeenCalledTimes(2)
+      expect(sent.mock.calls[0]![0][1]).toBe('+messages-send')
+      expect(sent.mock.calls[1]![0]).toEqual(['im', '+messages-reply', '--message-id', 'om_root', '--text',
+        expect.stringContaining('New evidence'), '--reply-in-thread', '--idempotency-key', 'retry-update'])
+      expect(comments).toEqual([])
+    } finally { await active.effects.drain(); sent.mockRestore(); active.store.close() }
+  })
+  it.each(['bug', 'namespace', 'recipient', 'bot'] as const)('starts a separate topic when the %s changes', async boundary => {
+    const h = await worker()
+    const sent = vi.spyOn(h.ctx.commands, 'lark').mockResolvedValueOnce({ message_id: 'om_old' }).mockResolvedValue({ message_id: 'om_new' })
+    try {
+      notifications(h)
+      guardZentaoReport(h.host, h.ticket, { state: 'blocked', summary: 'First notice' })
+      h.effects.start(); await h.outbox.sent()
+      let channel = h.ticket.channels[0]!
+      if (boundary === 'recipient') notifications(h, true, 'ou_different')
+      if (boundary === 'bot') h.ctx.commands.deployment.feishu!.appId = 'cli_different'
+      if (boundary === 'bug' || boundary === 'namespace') {
+        const next = config()
+        const data = await new ZentaoClient(next).bug(1)
+        if (boundary === 'bug') data.id = 2
+        else {
+          next.baseUrl += '/other'
+          const settings = h.store.settings()
+          h.store.saveSettings({ ...settings, sources: { ...settings.sources, zentao: { enabled: true, config: next } } })
+        }
+        channel = zentaoTrigger(next, data).channel!
+      }
+      h.outbox.send({ id: 'different-destination', channel, kind: 'notice', text: 'Different audience or bug' })
+      await h.outbox.sent()
+      expect(h.store.replyStatus('different-destination')).toBe('sent')
+      expect(sent).toHaveBeenCalledTimes(2)
+      expect(sent.mock.calls[1]![0]).toEqual(['im', '+messages-send', '--user-id',
+        boundary === 'recipient' ? 'ou_different' : 'ou_operator', '--text',
+        expect.stringContaining('Different audience or bug'), '--idempotency-key', 'different-destination'])
+    } finally { await h.effects.drain(); sent.mockRestore(); h.store.close() }
+  })
+  it('does not settle the first notification without a confirmed root message ID', async () => {
+    const h = await worker()
+    const sent = vi.spyOn(h.ctx.commands, 'lark').mockResolvedValueOnce({}).mockResolvedValue({ message_id: 'om_confirmed' })
+    try {
+      notifications(h)
+      const id = guardZentaoReport(h.host, h.ticket, { state: 'blocked', summary: 'First notice' })!
+      h.effects.start(); await h.outbox.sent()
+      expect(h.store.replyStatus(id)).toBe('pending')
+      h.advance(5000); await h.outbox.sent()
+      expect(h.store.replyStatus(id)).toBe('sent')
+      expect(sent.mock.calls[1]![0]).toEqual(sent.mock.calls[0]![0])
+      h.outbox.send({ id: 'after-confirmation', channel: h.ticket.channels[0]!, kind: 'notice', text: 'Follow-up' })
+      await h.outbox.sent()
+      expect(sent.mock.calls[2]![0]).toContain('om_confirmed')
+      expect(sent.mock.calls[2]![0]).toContain('--reply-in-thread')
+      expect(comments).toEqual([])
+    } finally { await h.effects.drain(); sent.mockRestore(); h.store.close() }
+  })
+  it('retries a failed topic reply in the same topic without starting another root', async () => {
+    const h = await worker()
+    const sent = vi.spyOn(h.ctx.commands, 'lark').mockResolvedValueOnce({ message_id: 'om_root' })
+      .mockRejectedValueOnce(new Error('Feishu unavailable')).mockResolvedValue({ message_id: 'om_reply' })
+    try {
+      notifications(h)
+      guardZentaoReport(h.host, h.ticket, { state: 'blocked', summary: 'First notice' })
+      h.effects.start(); await h.outbox.sent()
+      h.outbox.send({ id: 'followup', channel: h.ticket.channels[0]!, kind: 'notice', text: 'More evidence' })
+      await h.outbox.sent()
+      expect(h.store.replyStatus('followup')).toBe('pending')
+      h.advance(5000); await h.outbox.sent()
+      expect(h.store.replyStatus('followup')).toBe('sent')
+      expect(sent).toHaveBeenCalledTimes(3)
+      expect(sent.mock.calls[1]![0]).toEqual(['im', '+messages-reply', '--message-id', 'om_root', '--text',
+        expect.stringContaining('More evidence'), '--reply-in-thread', '--idempotency-key', 'followup'])
+      expect(sent.mock.calls[2]![0]).toEqual(sent.mock.calls[1]![0])
+      expect(comments).toEqual([])
+    } finally { await h.effects.drain(); sent.mockRestore(); h.store.close() }
+  })
+  it.each(['retry-limit', 'withdrawn'] as const)('reconciles an uncertain root before later notifications after %s', async mode => {
+    const h = await worker()
+    const roots = new Map<string, { id: string; text: string }>()
+    const replies: { root: string; id: string }[] = []
+    let lostResponses = mode === 'retry-limit' ? 3 : 1
+    const sent = vi.spyOn(h.ctx.commands, 'lark').mockImplementation(async args => {
+      const id = args.at(-1)!
+      if (args[1] === '+messages-send') {
+        if (!roots.has(id)) roots.set(id, { id: `om_root${roots.size + 1}`, text: args[5]! })
+        if (lostResponses-- > 0) throw new Error('Response lost after Feishu accepted the message')
+        return { message_id: roots.get(id)!.id }
+      }
+      replies.push({ root: args[3]!, id })
+      return { message_id: 'om_reply' }
+    })
+    try {
+      notifications(h)
+      const firstId = guardZentaoReport(h.host, h.ticket, { state: 'blocked', summary: 'Original evidence' })!
+      h.effects.start(); await h.outbox.sent()
+      expect(h.store.replyStatus(firstId)).toBe('pending')
+      if (mode === 'withdrawn') h.outbox.withdraw(firstId)
+      h.outbox.send({ id: 'later-notice', channel: h.ticket.channels[0]!, ticketId: h.ticket.id, kind: 'notice', text: 'Later evidence' })
+      await h.outbox.sent()
+      if (mode === 'retry-limit') {
+        h.advance(5000); await h.outbox.sent()
+        h.advance(10_000); await h.outbox.sent()
+        h.advance(20_000); await h.outbox.sent()
+        expect(h.store.replyStatus(firstId)).toBe('sent')
+      } else expect(h.store.replyStatus(firstId)).toBeUndefined()
+      expect([...roots.keys()]).toEqual([firstId])
+      expect(roots.get(firstId)!.text).toContain('Original evidence')
+      expect(replies).toEqual([{ root: 'om_root1', id: 'later-notice' }])
+      expect(h.store.replyStatus('later-notice')).toBe('sent')
       expect(comments).toEqual([])
     } finally { await h.effects.drain(); sent.mockRestore(); h.store.close() }
   })

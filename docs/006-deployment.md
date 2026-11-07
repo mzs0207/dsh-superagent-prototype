@@ -129,6 +129,8 @@ Create a local JSON credentials file, readable by the service account, containin
 
 `repository` must equal the selected Executor's repository web URL. Each Source covers one product/account/repository mapping. The poller reads **unclosed**, then filters exact product, assignee, `active`, and not-deleted; some ZenTao installations treat `status=active` as an unsupported browse mode and return an empty list. Event IDs include installation/product/account/repository, bug ID and activation count, not edit timestamps. Own comments, repeated polls and restarts do not create another ticket.
 
+ZenTao may return `assignedTo: null` for an unassigned bug, including resolved bugs in the unclosed list. It is normalized to an empty assignee so it cannot block pagination or match the configured account. Assignee checks still reject reading, commenting on, or resolving such a bug through ticket-scoped operations.
+
 Add a Policy rule authorizing diagnosis and repair of this Source's assigned bugs, set **Policy → ZenTao execution mode** (`policy.sources.zentao.mode`) to `auto`, and set `policy.sources.zentao.admission.bugs.unlistedUnaddressed` to `inferred`. Keep the global `eval.mode` and unrelated rules unchanged: other Sources continue inheriting their existing mode. Source mode `inherit` restores the global default; global `off` still disables all inferred work, including ZenTao. Assignment events are system events, never forged human requests. The team's Delivery requirements must include the scoped ZenTao exception in the bundled defaults; older customized delivery text needs that exception added explicitly.
 
 The worker uses `orchestrator_zentao`: read the bug/images, reproduce against the configured test environment, record a clean tested HEAD, merge its own pinned MR to **develop**, cherry-pick only that MR change into a separate test worktree, test it there, then publish **test** with a normal fast-forward push. A persisted Git checkpoint rejects amended or unrelated test worktrees. Changed-service coverage and shared-runtime changes are checked before publishing.
@@ -162,6 +164,10 @@ MR merge does not finish this workflow. A nonexistent, unreproducible or unsolva
    Both configurations share the keychain entry for the app secret. To remove only the bot configuration, delete its directory; do not run `lark-cli config remove`, which would affect the shared secret.
 
 For private ZenTao alerts, set **Settings → Sources → Feishu → ZenTao notification recipient open_id** (`notificationOpenId`) to one person's `ou_…` ID and enable Feishu. Leaving it empty or disabling Feishu keeps ZenTao comments. The bot sends the Bug number/link, blocker evidence and manual-retry instructions; it does not broadcast to authorized users or configured chats. This does not grant the recipient authority to start work.
+
+Each Bug's first notification is the root message; subsequent notifications reply inside its Feishu topic instead of adding separate messages to the chat. The root is stored durably and reused across service restarts and manual retries, independently of the Superagent ticket ID. Different ZenTao scopes, Bugs, bot applications or recipients use separate roots. This starts with the next notification after upgrading; older standalone messages are not moved or replayed. A failed topic reply stays pending for retry rather than silently sending another standalone message.
+
+Before sending the root, Outbox persists that creation request's ID and text. If its response is lost, later notifications first reconcile the same request rather than electing another root, even after the normal queue failure threshold or withdrawal of the original receipt. Feishu deduplicates an ID for one hour; retries beyond that remote window cannot guarantee exactly-once delivery.
 
 ## Install
 

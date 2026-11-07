@@ -19,7 +19,7 @@ const User = z.union([z.string(), z.looseObject({ account: z.string() })]).trans
 const Action = z.looseObject({ comment: z.string().nullish(), id: z.union([z.string(), z.number()]).optional() })
 export const ZentaoBugSchema = z.looseObject({
   id: z.coerce.number().int().positive(), product: z.coerce.number().int().positive(), title: z.string(), status: z.string(),
-  assignedTo: User, activatedCount: z.coerce.number().int().nonnegative().default(0),
+  assignedTo: User.nullable().transform(value => value ?? ''), activatedCount: z.coerce.number().int().nonnegative().default(0),
   deleted: z.union([z.boolean(), z.string(), z.number()]).optional().transform(value => value === true || value === '1' || value === 1),
   steps: z.string().default(''), openedDate: z.string().default(''),
   actions: z.union([z.array(Action), z.record(z.string(), Action)]).default([]).transform(value => Object.values(value)),

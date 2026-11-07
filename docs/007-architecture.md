@@ -197,6 +197,8 @@ That context supplies deployment and commands, setup readiness (`ready`, `config
 
 ZenTao is an independent Source (`sources/zentao.ts`, `zentao-client.ts`). Its ticket-scoped tools keep verification/release checkpoints in the existing KV store. Such tickets set `completion: "report"` (MR closure records a fact but does not end delivery) and `resume: "manual"` (blocked inputs remain context until an operator retries). The ordinary lifecycle remains unchanged. Failed/blocked notices and human-action replies use the durable outbox. At delivery, Outbox sends ZenTao messages privately through the enabled Feishu bot when `notificationOpenId` is set, keeping the same receipt/idempotency ID and retrying failures without falling back to comments. Otherwise native comment IDs are reconciled against the bug's action history. Successful resolution evidence stays in ZenTao. The release helper persists the exact cherry-picked commit under the Git common directory and per-service Jenkins receipts outside worktrees.
 
+`KV.zentao.feishuTopic` stores the Feishu root message ID keyed by ZenTao channel thread, bot application and notification recipient. `feishuTopicStart` durably fixes the first creation request's ID and text before calling Feishu. An uncertain outcome is retried with that same request, including when a later notice is released after queue failures or the original receipt was withdrawn. The confirmed root is persisted before any later notice replies to it; the original receipt can subsequently settle without sending its content again. Later notices use `im +messages-reply --reply-in-thread`; restarts and replacement tickets for the same Bug retain the root. No new database table or settings are needed.
+
 
 ### DshExecutor
 
