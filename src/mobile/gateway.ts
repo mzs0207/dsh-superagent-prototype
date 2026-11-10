@@ -1,10 +1,13 @@
-/** Separate LAN HTTP task viewer: password login, fixed loopback reads, no management proxy. */
+/** Private mobile gateway: password login, projected task reads and allowlisted conversation operations. */
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
-import { randomBytes, scrypt, timingSafeEqual } from 'node:crypto'
+import { createHash, randomBytes, scrypt, timingSafeEqual } from 'node:crypto'
 import { promisify } from 'node:util'
 import { isIP } from 'node:net'
+import { hostname } from 'node:os'
+import { once } from 'node:events'
 import type { ApiResponse } from '../app/api.ts'
 import { TICKET_FILTERS } from '../app/api.ts'
+import { publicDelivery } from '../app/views/delivery.ts'
 import html from './view.html?raw'
 import script from './view.js?raw'
 import style from './view.css?raw'
@@ -44,6 +47,7 @@ function row(ticket: ApiResponse<'GET tickets'>['items'][number] | ApiResponse<'
 }
 function detail(ticket: ApiResponse<'GET tickets/:id'>) {
   return { ...row(ticket), description: ticket.mandate.scope, attention: ticket.attention?.question,
+    delivery: publicDelivery(ticket.delivery),
     reports: ticket.assignments.flatMap(assignment => assignment.report
       ? [{ state: assignment.report.state, summary: assignment.report.summary, at: assignment.report.at }] : []).reverse() }
 }
@@ -53,6 +57,61 @@ function listQuery(query: URLSearchParams): string | undefined {
   if (!(TICKET_FILTERS as readonly string[]).includes(state) || !/^\d+$/.test(offset) || !/^\d+$/.test(limit)
     || !Number.isSafeInteger(Number(offset)) || Number(limit) < 1 || Number(limit) > 100) return
   return new URLSearchParams({ state, offset, limit }).toString()
+}
+function conversationQuery(path: string, query: URLSearchParams): string | undefined {
+  const names = path === '/api/conversations' ? ['offset'] : path.endsWith('/history') ? ['before', 'through'] : []
+  for (const name of query.keys()) {
+    const value = query.get(name)!
+    if (!names.includes(name) || query.getAll(name).length !== 1 || !/^\d+$/.test(value) || !Number.isSafeInteger(Number(value))) return
+  }
+  if (path.endsWith('/history') && (!query.has('before') || !query.has('through') || Number(query.get('before')) > Number(query.get('through')))) return
+  return query.toString()
+}
+async function conversationProxy(req: IncomingMessage, res: ServerResponse, url: URL, upstream: string, lifetime: AbortSignal) {
+  const query = conversationQuery(url.pathname, url.searchParams)
+  if (query === undefined || (req.method === 'POST' && url.search)) return send(res, 400, { error: '无效的会话参数' })
+  let body: string | undefined
+  if (req.method === 'POST') {
+    if (req.headers['x-superagent-request'] !== '1') return send(res, 403, { error: '缺少会话操作标识' })
+    if (req.headers['content-type'] !== 'application/json') return send(res, 415, { error: '会话操作必须使用 JSON' })
+    let bytes = 0
+    const chunks: Buffer[] = []
+    for await (const chunk of req.iterator({ destroyOnReturn: false })) {
+      bytes += chunk.length
+      if (bytes > 128 * 1024) { req.resume(); return send(res, 413, { error: '消息过长' }) }
+      chunks.push(Buffer.from(chunk))
+    }
+    body = Buffer.concat(chunks).toString('utf8')
+  }
+  const disconnected = new AbortController(), deadline = new AbortController()
+  res.on('close', () => disconnected.abort())
+  const signal = AbortSignal.any([lifetime, disconnected.signal, deadline.signal])
+  const timer = setTimeout(() => deadline.abort(), 15_000)
+  try {
+    const response = await fetch(`${upstream}/orchestrator${url.pathname}${query ? `?${query}` : ''}`, {
+      method: req.method, headers: { 'x-orchestrator-request': '1', 'content-type': 'application/json' },
+      body, redirect: 'error', signal,
+    })
+    if (!response.ok) {
+      await response.body?.cancel()
+      const status = [400, 404, 409].includes(response.status) ? response.status : 502
+      return send(res, status, { error: status === 404 ? '会话不存在，或电脑端尚未升级'
+        : status === 409 ? '会话状态已变化，请刷新后重试' : status === 400 ? '会话请求无效，请检查输入' : '电脑端会话服务暂不可用' })
+    }
+    if (url.pathname.endsWith('/events')) {
+      clearTimeout(timer)
+      if (!response.headers.get('content-type')?.startsWith('text/event-stream') || !response.body) throw new Error('Invalid event stream')
+      res.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8', 'x-accel-buffering': 'no' })
+      res.flushHeaders()
+      for await (const chunk of response.body) if (!res.write(chunk)) await once(res, 'drain', { signal })
+      res.end()
+    } else send(res, 200, await response.json())
+  } catch {
+    if (!res.destroyed) {
+      if (res.headersSent) res.destroy()
+      else send(res, 502, { error: '无法连接电脑端会话服务，请检查连接后重试' })
+    }
+  } finally { clearTimeout(timer) }
 }
 function authorized(req: IncomingMessage, token: Buffer): boolean {
   const credential = req.headers.cookie?.split(';').map(part => part.trim())
@@ -71,6 +130,9 @@ export async function startGateway(options: GatewayOptions) {
   if (!/^[a-f0-9]{32}$/.test(options.password.salt) || !/^[a-f0-9]{64}$/.test(options.password.hash)) throw new Error('Invalid password configuration')
   const token = Buffer.from(randomBytes(32).toString('base64url')), stopped = new AbortController()
   const expectedPassword = Buffer.from(options.password.hash, 'hex')
+  // The public fingerprint survives restarts, but changing the password invalidates saved credentials.
+  const identity = { service: 'superagent-viewer', version: 1,
+    id: createHash('sha256').update(options.password.salt).digest('hex'), name: hostname().slice(0, 80) }
   let origin = '', activeLogins = 0
   const server = createServer(async (req, res) => {
     res.setHeader('cache-control', 'no-store')
@@ -104,7 +166,15 @@ export async function startGateway(options: GatewayOptions) {
       finally { activeLogins-- }
       return
     }
-    if (req.method !== 'GET') return send(res, 405, { error: '此入口只允许读取任务' })
+    const conversation = url.pathname === '/api/conversations'
+      || /^\/api\/conversations\/[A-Za-z0-9_-]{1,160}\/(?:history|events|messages|stop)$/.test(url.pathname)
+    const conversationWrite = conversation && req.method === 'POST'
+      && (url.pathname === '/api/conversations' || /\/(?:messages|stop)$/.test(url.pathname))
+    if (req.method !== 'GET' && !conversationWrite) return send(res, 405, { error: '不允许此操作' })
+    if (url.pathname === '/.well-known/superagent') {
+      if (url.search) return send(res, 400, { error: '无效参数' })
+      return send(res, 200, identity)
+    }
     const loggedIn = authorized(req, token)
     const asset = url.pathname === '/' && !loggedIn ? ['text/html', loginHtml]
       : url.pathname === '/login.js' ? ['text/javascript', loginScript]
@@ -114,9 +184,15 @@ export async function startGateway(options: GatewayOptions) {
       res.writeHead(200, { 'content-type': `${asset[0]}; charset=utf-8` }); res.end(asset[1]); return
     }
     if (!loggedIn) return send(res, 401, { error: '请重新输入访问密码' })
+    if (conversation) {
+      if (req.method === 'GET' && /\/(?:messages|stop)$/.test(url.pathname)) return send(res, 405, { error: '不允许此操作' })
+      try { await conversationProxy(req, res, url, upstream, stopped.signal) }
+      catch { if (!res.destroyed) send(res, 400, { error: '会话请求中断' }) }
+      return
+    }
     const list = url.pathname === '/api/tickets'
     const match = /^\/api\/tickets\/([A-Za-z0-9_-]{1,160})$/.exec(url.pathname)
-    if (!list && !match) return send(res, 404, { error: '没有此只读接口' })
+    if (!list && !match) return send(res, 404, { error: '没有此接口' })
     const query = list ? listQuery(url.searchParams) : ''
     if (query === undefined || (!list && url.search)) return send(res, 400, { error: '无效的筛选或分页参数' })
     const disconnected = new AbortController()

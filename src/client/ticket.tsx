@@ -15,7 +15,7 @@ function InputLine({ input, earlier = [] }: { input: Input; earlier?: { id: stri
   const { t, navigate } = usePanel()
   const trigger = input.kind === 'trigger' ? input.trigger : undefined
   return <li className="dt-row">
-    <Dot state={input.delivered ? 'idle' : 'warning'} label={input.delivered ? t('inputDelivered') : t('inputUndelivered')} />
+    <Dot state={input.delivered ? 'idle' : 'warning'} label={t(input.held ? 'inputHeld' : input.delivered ? 'inputDelivered' : 'inputUndelivered')} />
     <div className="dt-row-main">
       {trigger ? <div className="dt-row-title"><button type="button" className="dt-open" onClick={() => navigate({ page: 'trigger',
         id: trigger.thread, query: { trigger: trigger.id } })}>
@@ -105,6 +105,31 @@ function MandateDetails({ ticket, actor }: { ticket: TicketPageView; actor: stri
   </Section>
 }
 
+function DeliveryEvidence({ ticket }: { ticket: TicketPageView }) {
+  const { t } = usePanel(), card = ticket.delivery, w = card.workflow
+  const text = (value: string | undefined) => <span style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{value || t('deliveryUnknown')}</span>
+  const rows: [string, ReactNode][] = [[t('deliveryScope'), text(card.scope)]]
+  if (card.summary && card.summary !== card.humanAction) rows.push([t('deliverySummary'), text(card.summary)])
+  if (card.humanAction && !ticket.attention) rows.push([t('deliveryHumanAction'), text(card.humanAction)])
+  if (w) rows.push(
+    [t('deliveryCause'), text(w.cause)], [t('deliveryChanges'), text(w.changes)],
+    [t('deliveryReproduction'), text(w.reproduction)], [t('deliveryTests'), text(w.tests)],
+    [t('deliveryHead'), text(w.head)],
+    ['MR', w.mr ? w.mr.url ? <ExternalLink href={w.mr.url}>!{w.mr.number}</ExternalLink> : `!${w.mr.number}` : t('deliveryUnknown')],
+    ['develop SHA', text(w.mergeCommit)], ['test SHA', text(w.testCommit)],
+    [t('deliveryTestVerification'), text(w.testVerification)],
+    [t('deliveryPublished'), t(w.published ? 'deliveryRecorded' : 'deliveryUnknown')],
+    [t('deliveryDeployment'), w.deployment ? <div className="dt-kv-stack">
+      <When at={w.deployment.at} />{w.deployment.builds.map(build => <div key={`${build.service}:${build.number}`}>
+        {build.url ? <ExternalLink href={build.url}>{build.service} #{build.number}</ExternalLink> : `${build.service} #${build.number}`}
+        <div style={{ overflowWrap: 'anywhere' }}>{build.commit}</div>
+      </div>)}</div> : t('deliveryUnknown')],
+    [t('deliveryLiveVerification'), text(w.liveVerification)],
+    [t('deliveryResolved'), t(w.resolved ? 'deliveryRecorded' : 'deliveryUnknown')],
+  )
+  return <Section title={t('deliveryTitle')}><Hint>{t('deliveryEvidenceHint')}</Hint><KeyValues rows={rows} /></Section>
+}
+
 export function TicketPage({ id }: { id: string }) {
   const { t, call } = usePanel()
   const { data, error, reload } = usePoll(() => call('GET tickets/:id', { id }), [id])
@@ -116,8 +141,6 @@ export function TicketPage({ id }: { id: string }) {
   const actor = actorName(t, data.mandate.actor)
   const { legacy } = data.basis
   const undelivered = data.inputs.filter(input => !input.delivered)
-  const failedText = /^(?:\w+Error|Error)\b[:：]/.test(data.summary)
-  const failed = data.stage === 'person' && data.action === 'failed'
   const opening = data.threads.find(thread => thread.url)
   const ended = data.ended && (() => {
     const outcome = valueLabel(t, 'outcome', data.ended.outcome), reason = reasonLabel(t, data.ended.reason), time = when(data.ended.at,
@@ -146,16 +169,14 @@ export function TicketPage({ id }: { id: string }) {
       {channel && <div className="dt-banner-actions">
         <ActionLink href={channel.url} icon="message">{t('answerIn', { source: valueLabel(t, 'source', channel.source) })}</ActionLink>
       </div>}</div>}
-    {/* Ordinary progress stays in the Session/Channels; only a report that halted work (blocked/failed) is shown here. */}
-    {data.actions.retry && data.summary && <p className={`dt-banner${failed ? ' dt-danger' : ''}${failedText ? ' dt-mono' : ''}`}>
-      <span className="dt-banner-label">{t(failed ? 'failedPrefix' : 'blockedPrefix')}</span>{data.summary}
-    </p>}
     {data.deliveryError && <p className="dt-banner dt-danger dt-mono">
       <span className="dt-banner-label">{t('deliveryFailedPrefix')}</span>{data.deliveryError}
     </p>}
+    <DeliveryEvidence ticket={data} />
     <MandateDetails ticket={data} actor={actor} />
     {undelivered.length > 0 && <Section title={t('undeliveredInputs')} count={undelivered.length}>
-      <Hint>{data.deliveryError ? t('inputRetryHint') : data.paused ? t('inputPausedHint') : t('inputWaitingHint')}</Hint>
+      <Hint>{data.deliveryError ? t('inputRetryHint') : data.paused ? t('inputPausedHint')
+        : undelivered.some(input => input.held) ? t('inputHeld') : t('inputWaitingHint')}</Hint>
       <InputList inputs={undelivered} />
     </Section>}
     {data.threads.length > 0 && <Section title={t('subscribedThreads')} count={data.threads.length}>

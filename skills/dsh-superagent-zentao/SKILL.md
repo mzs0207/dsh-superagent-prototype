@@ -17,7 +17,8 @@ description: Use when a ticket originates from ZenTao, DSH_SUPERAGENT_ZENTAO_BUG
 
 1. `orchestrator_zentao(action=read)`：读取最新步骤、预期/实际结果、历史备注、附件和持久化检查点。图片用 `action=file,file_id=<本单附件编号>` 下载，再用文件/图像工具实际查看。只在本工单目录工作。
 2. 在 `DSH_SUPERAGENT_ZENTAO_TEST_API` 对应测试环境复现；查代码和日志，区分已不存在、缺少复现条件、尚未找到原因。不存在或不能确认/解决时走下面的暂停流程，不猜测、不做投机修复。
-3. 从 develop 的独立 `agent/$DSH_SUPERAGENT_NAME` 分支修复，运行相关测试及真实场景验证，提交并保持工作区干净。`action=verified,head=<完整HEAD>,reproduction=<失败前证据>,tests=<修复后命令和结果>` 固定验证版本并检查 Jenkins 可用性。
+3. 从 develop 的独立 `agent/$DSH_SUPERAGENT_NAME` 分支修复，运行相关测试及真实场景验证，提交并保持工作区干净。`action=verified,head=<完整HEAD>,cause=<已验证根因>,changes=<实际修复范围>,reproduction=<失败前证据>,tests=<修复后命令和结果>` 固定验证版本并检查 Jenkins 可用性。这些字段直接构成交付验收卡，不得用计划、猜测或“测试通过”代替实际证据。
+   `cause`、`changes` 必须是已验证结论的短摘要，不含密码、令牌、个人资料或原始日志；启用 Hindsight 时，完整验证并完成任务后宿主会将这两个摘要及结构化版本证据写入项目记忆。召回的历史记录仅供参考，不能代替本次验证或扩大授权。
 4. 推送本工单分支，使用 native glab 创建目标 develop 的 MR；`orchestrator_report(state=progress,pr_number=<IID>)` 绑定它。满足服务器审批/CI要求后，`action=merge,mr=<IID>` 以已验证 SHA 合并；不放宽审批。MR 合并不是工单完成。
 5. `action=sync_test` 只 cherry-pick 该 MR 的 squash/merge 变更到独立 test worktree，不合并整个 develop。在返回的 `testDirectory` 运行相关测试。冲突或缺少依赖立即暂停，禁止 reset、强推或把其他 develop 改动一起带过去。
 6. `action=publish_test,verification=<test目录测试命令与结果>,services=[<受影响服务>]` 普通快进推送 test，返回部署命令。共享运行库/构建改动须覆盖全部相关服务；不遗漏变更服务。
@@ -32,4 +33,4 @@ description: Use when a ticket originates from ZenTao, DSH_SUPERAGENT_ZENTAO_BUG
 
 返回 `zentao_notification_status=sent` 才能说通知成功；pending 表示仍在持久化队列中等待补送，飞书发送失败不会自动回退为备注。无论通知是否成功，都必须立即停止代码/发布动作。不得改 Bug 为已关闭、已解决、延期或重新指派来代替通知；不要用 dropped。
 
-暂停后轮询、评论、CI消息或服务重启都不是恢复授权。只有面板人工 Retry 才恢复。即使看似临时 Jenkins 故障，也不得自行重跑；人工重试后先读检查点和远端状态，已成功的合并、推送、通知不重复；不明确的入队请求先人工查 Jenkins，禁止重复触发。
+暂停后轮询、普通评论、CI消息或服务重启都不是恢复授权。面板人工 Retry，或当前已授权通知收件人在对应飞书话题内单独回复“继续”并通过宿主校验，才恢复原任务。补充信息仅作上下文。即使看似临时 Jenkins 故障，也不得自行重跑；人工重试后先读补充信息、检查点和远端状态，已成功的合并、推送、通知不重复；不明确的入队请求先人工查 Jenkins，禁止重复触发。

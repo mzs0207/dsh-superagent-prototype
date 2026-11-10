@@ -12,6 +12,10 @@ const item = { id: 't1', title: '<img src=x onerror=alert(1)>', stage: 'person',
   attention: { question: 'Which target?' }, threads: [{ source: 'zentao', title: 'Bug 1', url: 'http://internal/bug/1', facts: { secret: 'private' } }],
   actions: { retry: true, stop: true }, sessionId: 'secret-session', directory: '/private/work',
   environment: [{ key: 'SECRET', value: 'private-token' }], mandate: { scope: 'Fix the bug', actor: { id: 'private-user' } },
+  delivery: { scope: 'Fix the bug', summary: 'Waiting for review', humanAction: 'Which target?', secret: 'private-card',
+    workflow: { published: true, resolved: false, receipt: '/private/release.json', mr: { number: 7, url: 'javascript:alert(1)' },
+      deployment: { at: '2026-11-06T10:00:00Z', builds: [{ service: 'api', number: 8, commit: 'b'.repeat(40),
+        url: 'https://ci.invalid/job/8', secret: 'private-build' }] } } },
   assignments: [{ id: 'a1', state: 'running', createdAt: '2026-11-06T09:00:00Z', report: { state: 'blocked', summary: 'Review required', at: '2026-11-06T10:00:00Z' }, ref: 'private-session', args: 'private-arguments' }] }
 
 beforeEach(async () => {
@@ -24,6 +28,10 @@ beforeEach(async () => {
     if (mode === 'redirect') { res.writeHead(302, { location: '/orchestrator/api/settings' }); res.end(); return }
     if (mode === 'missing') { res.writeHead(404); res.end('private error'); return }
     if (mode === 'broken') { res.writeHead(500); res.end('private stack'); return }
+    if (req.url?.endsWith('/events')) {
+      res.writeHead(200, { 'content-type': 'text/event-stream' })
+      res.end('data: {"type":"live","text":"正在回复"}\n\n'); return
+    }
     res.setHeader('content-type', 'application/json')
     res.end(JSON.stringify(req.url?.startsWith('/orchestrator/api/tickets?') ? { items: [item], total: 24, next_offset: 20 } : item))
   })
@@ -41,7 +49,7 @@ afterEach(async () => {
 })
 function call(path: string, headers: Record<string, string | undefined> = { cookie: sessionCookie }, method = 'GET', body?: string) {
   return new Promise<{ status: number; body: string; headers: Record<string, unknown> }>((resolve, reject) => {
-    const req = request(`${gateway.origin}${path}`, { method, headers }, res => {
+    const req = request(`${gateway.origin}${path}`, { method, headers: Object.fromEntries(Object.entries(headers).filter(([, value]) => value !== undefined)) }, res => {
       let body = ''; res.setEncoding('utf8'); res.on('data', chunk => { body += chunk });
       res.on('end', () => resolve({ status: res.statusCode!, body, headers: res.headers }))
     }); req.on('error', reject); req.end(body)
@@ -121,4 +129,56 @@ it('rejects malformed request targets without killing the viewer', async () => {
   })
   expect(status).toBe(400)
   expect((await call('/api/tickets')).status).toBe(200)
+})
+it('discovers a viewer without credentials but exposes no tasks or password material', async () => {
+  const response = await call('/.well-known/superagent', {})
+  expect(response.status).toBe(200)
+  const identity = JSON.parse(response.body)
+  expect(identity).toEqual({ service: 'superagent-viewer', version: 1, id: expect.stringMatching(/^[a-f0-9]{64}$/), name: expect.any(String) })
+  expect(response.body).not.toContain(password.salt)
+  expect(response.body).not.toContain(password.hash)
+  expect((await call('/api/tickets', {})).status).toBe(401)
+  expect(seen).toEqual([])
+  for (const headers of [{ host: 'evil.example' }, { origin: 'http://evil.example' }]) {
+    expect((await call('/.well-known/superagent', headers)).status).toBe(403)
+  }
+  expect((await call('/.well-known/superagent?extra=1', {})).status).toBe(400)
+  expect((await call('/.well-known/superagent', {}, 'POST')).status).toBe(405)
+  const upstreamOrigin = `http://127.0.0.1:${(upstream.address() as { port: number }).port}`
+  await gateway.close()
+  gateway = await startGateway({ host: '127.0.0.1', port: 0, upstream: upstreamOrigin, password })
+  expect(JSON.parse((await call('/.well-known/superagent', {})).body).id).toBe(identity.id)
+  await gateway.close()
+  gateway = await startGateway({ host: '127.0.0.1', port: 0, upstream: upstreamOrigin, password: { ...password, salt: 'c'.repeat(32) } })
+  expect(JSON.parse((await call('/.well-known/superagent', {})).body).id).not.toBe(identity.id)
+})
+
+it('allows authenticated conversation operations but requires a JSON same-origin write intent', async () => {
+  const path = '/api/conversations/chat-1/messages'
+  const headers = { cookie: sessionCookie, 'content-type': 'application/json', 'x-superagent-request': '1' }
+  expect((await call(path, headers, 'POST', '{"requestId":"r1","text":"你好"}')).status).toBe(200)
+  expect(seen).toEqual(['POST /orchestrator/api/conversations/chat-1/messages'])
+  seen = []
+  expect((await call(path, { ...headers, cookie: undefined }, 'POST', '{}')).status).toBe(401)
+  expect((await call(path, { ...headers, 'x-superagent-request': undefined }, 'POST', '{}')).status).toBe(403)
+  expect((await call(path, { ...headers, origin: 'http://evil.example' }, 'POST', '{}')).status).toBe(403)
+  expect((await call(path, { ...headers, 'content-type': 'text/plain' }, 'POST', '{}')).status).toBe(415)
+  expect((await call(path, headers, 'POST', 'x'.repeat(128 * 1024 + 1))).status).toBe(413)
+  expect((await call('/api/conversations/chat-1/delete', headers, 'POST', '{}')).status).toBe(405)
+  expect((await call('/api/tickets/t1/stop', headers, 'POST', '{}')).status).toBe(405)
+  expect(seen).toEqual([])
+})
+
+it('streams conversation replies and confines conversation query parameters', async () => {
+  const result = await call('/api/conversations/chat-1/events')
+  expect(result.status).toBe(200)
+  expect(result.headers['content-type']).toContain('text/event-stream')
+  expect(result.body).toBe('data: {"type":"live","text":"正在回复"}\n\n')
+  seen = []
+  for (const path of ['/api/conversations?offset=-1', '/api/conversations?extra=settings',
+    '/api/conversations/chat-1/history?before=3&through=2', '/api/conversations/chat-1/events?url=http://evil.example',
+    '/api/conversations/chat-1/history?before=2&through=3&before=1']) {
+    expect((await call(path)).status, path).toBe(400)
+  }
+  expect(seen).toEqual([])
 })

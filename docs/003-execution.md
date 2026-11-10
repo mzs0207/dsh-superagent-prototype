@@ -28,6 +28,8 @@ Executor Sessions run commands without approval as the operator's OS user. Their
 
 The main Session uses `dsh-superagent-router`, with the same 5-second shell and job-wait limits and a smaller tool set for routing. Sessions retain the preset selected at creation. Worker subagents use DeepSeek Harness's `standard` preset.
 
+When optional Hindsight memory is configured, a worker's first assignment includes bounded, project-scoped historical references. These are context only, never instructions or authority; the worker must verify them against current code and evidence. Recall failures do not prevent launch. A successfully completed ZenTao task with complete verification checkpoints queues a compact repair summary for retention independently of task completion; raw reports, logs and transcripts are not exported.
+
 ### Background work and worker slots
 
 When a turn ends with shell jobs or subagents still running, the Ticket keeps its worker slot and stays working. It is not reported as waiting, and the main Session receives no waiting report. A completed job or subagent wakes the Executor with its result in the same slot. Once a turn ends with no background work, the Executor reports waiting normally.
@@ -92,6 +94,8 @@ Reviews without a body, such as approvals, also arrive as Triggers and can wake 
 ZenTao workflows continue after MR merge through a fix-only cherry-pick to `test`, tests in that separate worktree, deployment and live verification. They use `completion: "report"` to prevent merge/closure from ending work early. Their `resume: "manual"` keeps comments and CI from waking a blocked ticket. A nonexistent or unresolved bug reports `blocked` with an evidence notification, not the ordinary `dropped` path described below. Enabled Feishu notifications go to the configured fixed recipient instead of adding a bug comment; otherwise comment delivery remains. Successful resolution still records evidence and does not automatically close the bug. The branch-based Jenkins job may check out a newer `test` commit while queued; a mismatch pauses the workflow rather than marking the bug fixed.
 Manual pauses take precedence over restart-recovery timestamps, including when delivery and the blocked report were recorded in the same millisecond. Recovery neither starts another Assignment nor flushes held inputs until an operator retries.
 Host-side test cherry-picks explicitly use the configured repository account as committer; they do not depend on Git user configuration or environment variables from a worker shell.
+Replies to a persisted ZenTao Feishu notification topic are correlated with exactly one live Ticket. Only the current notification recipient, also present on the Feishu allowed-user list, may supply context or resume it. Ordinary replies are retained as context and never release a blocked/failed hold. An exact trimmed `继续` message newer than the current hold invokes the same retry as the panel, releasing held context into the original worker Session. Disabled Sources, changed scopes or mandates, global processing pause, ambiguous/ended Tickets and replayed commands cannot start new work.
+
 
 
 ## How a Ticket ends

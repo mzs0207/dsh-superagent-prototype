@@ -3,17 +3,18 @@ import { spawn } from 'node:child_process'
 import { createInterface } from 'node:readline'
 import { setTimeout as delay } from 'node:timers/promises'
 import { z } from 'zod'
-import { threadKey, type Thread, type Trigger } from '../core/index.ts'
+import { key, threadKey, type Thread, type Trigger } from '../core/index.ts'
 import { feishuChatLink } from './feishu-channel.ts'
 import type { FeishuBot } from '../deployment.ts'
 import { validItems, type Tally } from '../infra/commands.ts'
 import { readFeishu, type FeishuRef } from './feishu-read.ts'
-import { feishuRef, feishuTime, feishuTrigger, HistoricalMessageSchema, historyEvent, HistoryPageSchema, SOURCE, topicEvent }
+import { feishuRef, feishuThreadId, feishuTriggerId, feishuTime, feishuTrigger, HistoricalMessageSchema, historyEvent, HistoryPageSchema, SOURCE, topicEvent }
   from './feishu-trigger.ts'
 import { health, type SourceContext } from './host.ts'
 import { KV } from '../kv.ts'
 import { cursorAt, POLL_HORIZON_MS, polled, pollThreads as pollEach } from './poll.ts'
 import type { FeishuConfig } from './feishu.ts'
+import { zentaoNamespace, type ZentaoConfig } from './zentao.ts'
 
 export const runFeishu = (ctx: SourceContext, signal: AbortSignal): Promise<unknown> =>
   Promise.allSettled([watch, backfillLoop, chatNamesLoop].map(loop => loop(ctx, signal)))
@@ -155,7 +156,8 @@ async function backfillLoop(ctx: SourceContext, signal: AbortSignal): Promise<vo
         if (!signal.aborted) ctx.state.set(cursorKey, cursorAt(started))
       } catch (error) { if (!signal.aborted) errors.push(`${chatId}: ${String(error)}`) }
     }
-    await pollThreads(ctx, signal, tally)
+    try { await pollThreads(ctx, signal, tally) }
+    catch (error) { if (!signal.aborted) errors.push(String(error)) }
     const skipped = tally.skipped ? `; ${tally.skipped} unreadable messages skipped` : ''
     if (!signal.aborted) ctx.report('history', errors.length
       ? { state: 'error', detail: errors.join('\n') }
@@ -218,9 +220,60 @@ export function threadRef(ctx: SourceContext, thread: Thread): FeishuRef | undef
   const trigger = ctx.triggers.latest(thread.key)
   return trigger ? feishuRef(trigger) : undefined
 }
+/** Enrol sent notification roots before any inbound event, including roots saved by an earlier process. */
+async function followNotificationTopics(ctx: SourceContext, signal?: AbortSignal): Promise<string[]> {
+  const config = enabled(ctx), zentao = ctx.config<ZentaoConfig>('zentao'), identity = ctx.deployment.feishu
+  if (!config?.directMessages || !config.notificationOpenId || !identity || !zentao || zentao.repository !== ctx.deployment.webUrl) return []
+  const namespace = zentaoNamespace(zentao), roots = new Map<string, string[]>()
+  for (const ticket of ctx.tickets.open()) for (const channel of ticket.channels) {
+    if (channel.source !== 'zentao' || channel.address.namespace !== namespace) continue
+    const root = ctx.state.get(KV.zentao.feishuTopic(key(channel.thread, identity.appId, config.notificationOpenId)))
+    if (root) roots.set(root, [...roots.get(root) ?? [], ticket.id])
+  }
+  const followed = new Map(ctx.threads.subscribed(SOURCE).map(thread => [thread.meta.notificationRoot, thread]))
+  const errors: string[] = []
+  for (const [root, tickets] of roots) {
+    if (signal?.aborted) break
+    try {
+      let thread = followed.get(root)
+      if (!thread) {
+        const result = z.object({ items: z.array(HistoricalMessageSchema) }).parse(await ctx.commands.withSignal(signal).lark(
+          ['api', 'GET', '/open-apis/im/v1/messages/mget', '--params', JSON.stringify({ message_ids: [root] })]))
+        const message = result.items.find(item => item.message_id === root)
+        if (!message || message.deleted || ![identity.appId, identity.botId].includes(message.sender.id)) {
+          throw new Error('Notification root is unavailable or belongs to another sender')
+        }
+        const at = feishuTime(message.create_time), ref = { source: SOURCE, id: feishuThreadId(message.chat_id, undefined, root) }
+        // A configuration change during the read cannot enrol the old audience under the new bot/recipient.
+        const current = enabled(ctx), currentZentao = ctx.config<ZentaoConfig>('zentao')
+        if (!current?.directMessages || current.notificationOpenId !== config.notificationOpenId
+          || ctx.deployment.feishu?.appId !== identity.appId || !currentZentao || zentaoNamespace(currentZentao) !== namespace) continue
+        ctx.atomic(() => {
+          for (const id of tickets) {
+            const ticket = ctx.tickets.get(id)
+            if (ticket && !ticket.ended) ctx.tickets.followForContext(id, ref)
+          }
+          ctx.state.set(KV.feishu.chats, { ...ctx.state.get(KV.feishu.chats), [message.chat_id]: true })
+          if (!ctx.state.get(KV.feishu.history(message.chat_id))) ctx.state.set(KV.feishu.history(message.chat_id), cursorAt(at))
+          ctx.threads.patch(threadKey(ref), { notificationRoot: root, notificationSince: at, chatId: message.chat_id,
+            messageId: root, sourceTriggerId: feishuTriggerId(root) })
+        })
+        thread = ctx.threads.get(threadKey(ref))
+      }
+      if (thread) for (const id of tickets) {
+        const ticket = ctx.tickets.get(id)
+        if (ticket && !ticket.ended && !thread.subscriptions.includes(id)) ctx.tickets.followForContext(id, thread.ref)
+      }
+    } catch (error) { if (!signal?.aborted) errors.push(`Notification ${root}: ${String(error)}`) }
+  }
+  return errors
+}
+
 /** Polls subscribed Feishu threads within the polling horizon so replies missed by the live stream become triggers. */
 export async function pollThreads(ctx: SourceContext, signal?: AbortSignal, tally?: Tally): Promise<void> {
+  const errors = await followNotificationTopics(ctx, signal)
   await pollEach(ctx, SOURCE, () => !!signal?.aborted, thread => pollThread(ctx, thread, signal, tally))
+  if (errors.length) throw new Error(errors.join('\n'))
 }
 async function pollThread(ctx: SourceContext, thread: Thread, signal?: AbortSignal, tally?: Tally): Promise<void> {
   const ref = threadRef(ctx, thread)
@@ -242,7 +295,7 @@ async function pollThread(ctx: SourceContext, thread: Thread, signal?: AbortSign
     ctx.state.set(checkpoint, [...known])
   }
   const direct = ctx.state.get(KV.feishu.chats)?.[ref.chatId] === true
-  const since = Date.parse(thread.createdAt)
+  const since = Date.parse(typeof thread.meta.notificationSince === 'string' ? thread.meta.notificationSince : thread.createdAt)
   const root = thread.ref.id.slice(thread.ref.id.indexOf(':') + 1)
   let resource: string | null = `feishu/${ref.triggerId}/thread`
   while (resource) {

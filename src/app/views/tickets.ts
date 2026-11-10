@@ -6,6 +6,7 @@ import type { Store } from '../store.ts'
 import { channelLink, decisionView, newestFirst, page, snapshot, threadSummary, ticketLine, type Snapshot,
   type ViewHost } from './records.ts'
 import { markdown, preview } from './text.ts'
+import { deliveryCard } from './delivery.ts'
 
 export type BasisFact =
   | { name: 'addressed'; value: 'mention' | 'direct' } | { name: 'followup' } | { name: 'admission'; value: AdmissionCell } | { name: 'observation' }
@@ -67,12 +68,15 @@ export function ticketDetail(host: ViewHost, id: string) {
       preview: preview(trigger.text), thread: threadKey(trigger.threads[0]!),
       ...handback ? { handback: { reason: handback.reason, at: handback.at } } : {} }
     const text = (value.kind === 'text' || value.kind === 'note') && value.text ? { text: markdown(value.text) } : {}
-    return { ...value, ...text, delivered: !ticket.undelivered.includes(value.id), ...shown ? { trigger: shown } : {} }
+    const held = value.kind === 'trigger' && value.context && !value.deliveredTo && !ticket.undelivered.includes(value.id)
+    return { ...value, ...text, ...held ? { held: true as const } : {},
+      delivered: !held && !ticket.undelivered.includes(value.id), ...shown ? { trigger: shown } : {} }
   }
   // Pass `human = false` for bot-originated mandates so the Source kind still labels the actor as a bot if removed from the policy list.
   const human = ticket.mandate.basis.via !== 'bot'
   return { ...ticketLine(view, ticket), mandate: { ...ticket.mandate, actor: view.actor(ticket.mandate.actor, human) },
     basis: basisFacts(ticket.mandate.basis, view.rule), paused: store.settings().paused,
+    delivery: deliveryCard(store, ticket),
     channels: ticket.channels.map(channel => channelLink(view, channel)),
     decision: decision ? decisionView(view, decision) : undefined,
     // Every started Assignment ran in the ticket's one worker Session. A running assignment whose worker reported a non-progress state has finished its turn unless a human response resumed the ticket.

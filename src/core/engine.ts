@@ -46,6 +46,17 @@ export class Engine {
    * Triggers that arrive while an Eval of that Thread runs wait together for the next one.
    */
   receive(trigger: Trigger): ReceiveResult { return this.repo.atomic(() => this.intake.receive(trigger)) }
+  /** Record a trusted, explicitly correlated message as context for one live ticket, never as a new request. */
+  receiveContext(ticketId: string, trigger: Trigger): ReceiveResult {
+    return this.repo.atomic(() => {
+      const ticket = this.repo.tickets.get(ticketId)
+      if (!ticket || !liveTicket(ticket)) throw new UserError('ticketEnded')
+      if (!this.options.policy().revalidate(ticket.mandate)) throw new UserError('mandateRevoked')
+      const result = this.intake.receive(trigger, ticket)
+      if (result === 'stored') for (const ref of trigger.threads) this.tickets.followForContext(ticketId, ref)
+      return result
+    })
+  }
   /**
    * A Source's request to make an open ticket follow one of its Threads, such as a pull request's, `own` when the ticket
    * opened it: the ticket subscribes to it, and a ready report ends it only once `followsDone` holds (see `Tickets.followsDone`).

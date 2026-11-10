@@ -27,6 +27,7 @@ import { settingsView } from './views/settings.ts'
 import { sourcesStatus, type SetupState } from './views/sources.ts'
 import { decisionList, search, threadDetail, threadList } from './views/threads.ts'
 import { executorLoad, ticketDetail, ticketList } from './views/tickets.ts'
+import { Conversations } from './conversations.ts'
 
 export interface HttpHost {
   readonly store: Store
@@ -87,6 +88,12 @@ function failure(error: unknown): [number, Record<string, unknown>] {
   if (error instanceof RouteError) return [error.status, { error: error.message }]
   if (error instanceof UserError) return [error.missing ? 404 : 400, { error: error.message, code: error.code, values: error.values }]
   if (error instanceof SettingsConflict || error instanceof PromptConflict) return [409, { error: error.message }]
+  if (error instanceof Error && 'code' in error) {
+    if (error.code === 'session/not-found') return [404, { error: 'Conversation not found' }]
+    if (['session/writer-held', 'session/agent-busy', 'session/migration-required'].includes(String(error.code))) {
+      return [409, { error: 'Conversation is unavailable in its current state' }]
+    }
+  }
   return [500, { error: error instanceof Error ? error.message : String(error) }]
 }
 
@@ -148,11 +155,16 @@ const SourceBlock = z.templateLiteral(['source:', z.string().regex(/^[a-z][a-z0-
 const SettingsBlockSchema = z.union([z.enum(['policy', 'eval', 'executor']), SourceBlock])
 const SaveRequest = z.object({ value: z.unknown(), revision: z.number().int().nonnegative() })
 
-function routes(runtime: HttpHost): Routes {
+function routes(runtime: HttpHost, conversations: Conversations): Routes {
   const { store } = runtime
   const ticket = (id: string) => { if (!store.tickets.get(id)) throw new RouteError(404, 'Ticket not found'); return id }
   const promptBody = (input: { body: (maxBytes?: number) => Promise<unknown> }) => input.body(4 * runtime.machine.promptMaxChars.get() + 4096)
   return {
+    'GET conversations': ({ query }) => conversations.list(query),
+    'POST conversations': async ({ body }) => conversations.create(await body()),
+    'GET conversations/:id/history': ({ params, query }) => conversations.history(params.id, query),
+    'POST conversations/:id/messages': async ({ params, body }) => conversations.prompt(params.id, await body()),
+    'POST conversations/:id/stop': ({ params }) => conversations.stop(params.id),
     'GET state': () => stateView(runtime),
     'GET overview': () => overview(views(runtime), runtime.health, policyVersion(store.settings()),
       executorLoad(store, runtime.executor.activeCount()), runtime.setupProblem ?? runtime.feishuProblem),
@@ -229,7 +241,8 @@ function match(table: Routes, method: string, segments: string[]) {
 }
 export function registerHttp(ctx: Context, runtime: HttpHost): () => void {
   if (ctx.webServer.host !== '127.0.0.1') throw new Error('Orchestrator management requires a loopback Web server')
-  const table = routes(runtime)
+  const conversations = new Conversations(ctx, runtime), stopped = new AbortController()
+  const table = routes(runtime, conversations)
   const disposers = [
     ctx.webServer.register({ kind: 'prefix', path: '/orchestrator', handler: async (req, res) => {
       const url = new URL(req.url ?? '/', 'http://localhost')
@@ -237,11 +250,15 @@ export function registerHttp(ctx: Context, runtime: HttpHost): () => void {
       if (!sameOrigin(req, ctx.webServer.port)) { json(res, 403, { error: 'Same-origin management request required' }); return }
       try {
         await runtime.ready
+        const stream = /^\/orchestrator\/api\/conversations\/([A-Za-z0-9_-]{1,160})\/events$/.exec(url.pathname)
+        if (req.method === 'GET' && stream && !url.search) {
+          await conversations.stream(stream[1]!, res, stopped.signal); return
+        }
         const route = match(table, req.method ?? 'GET', url.pathname.slice('/orchestrator/api/'.length).split('/'))
         if (!route) throw new RouteError(404, 'Unknown operation')
         const query = Object.fromEntries(url.searchParams)
         json(res, 200, await route.run({ params: route.params as never, query, body: maxBytes => readBody(req, maxBytes) }))
       } catch (error) { json(res, ...failure(error)) }
     } })]
-  return () => { for (const dispose of disposers) dispose() }
+  return () => { stopped.abort(); for (const dispose of disposers) dispose() }
 }

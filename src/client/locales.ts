@@ -6,6 +6,26 @@ import { SETUP_PROBLEMS } from '../setup.ts'
 import { HEALTH_TEXT } from '../sources/host.ts'
 
 const TEXT = {
+  deliveryTitle: ['交付验收', 'Delivery evidence'],
+  deliveryEvidenceHint: ['仅展示已记录证据；历史验证不代表当前环境版本。', 'Recorded evidence only; past verification does not prove the current environment revision.'],
+  deliveryUnknown: ['尚无证据', 'No evidence recorded'],
+  deliveryRecorded: ['已记录', 'Recorded'],
+  deliveryScope: ['任务范围', 'Task scope'],
+  deliverySummary: ['最新结论', 'Latest conclusion'],
+  deliveryHumanAction: ['待你处理', 'Needs your action'],
+  deliveryCause: ['问题根因', 'Root cause'],
+  deliveryChanges: ['修复范围', 'Change scope'],
+  deliveryReproduction: ['修复前复现', 'Before-fix reproduction'],
+  deliveryTests: ['修复后验证', 'Fix verification'],
+  deliveryHead: ['已验证 HEAD', 'Verified HEAD'],
+  deliveryTestVerification: ['test 分支验证', 'Test-branch verification'],
+  deliveryPublished: ['test 推送记录', 'Test publication'],
+  deliveryDeployment: ['部署核验证据', 'Verified deployment'],
+  deliveryLiveVerification: ['部署后复验', 'Post-deployment verification'],
+  deliveryResolved: ['禅道解决记录', 'ZenTao resolution'],
+  inputHeld: ['补充信息已保存，等待人工继续', 'Context saved; awaiting explicit resume'],
+  'health.memory': ['项目记忆', 'Project memory'],
+  'health.memory-retain': ['记忆写入', 'Memory retention'],
   // Shared
   title: ['Superagent', 'Superagent'],
   close: ['关闭', 'Close'],

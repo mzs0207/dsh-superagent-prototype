@@ -11,7 +11,7 @@ import type { Store } from './store.ts'
 export interface SourceContextDeps {
   readonly store: Pick<Store, 'atomic' | 'get' | 'set' | 'delete' | 'keys' | 'threads' | 'tickets' | 'triggers' | 'read'>
   readonly outbox: Pick<Outbox, 'send'>
-  readonly engine: Pick<EngineForSources, 'bindThread' | 'threadClosed'> & Pick<EngineForExecutor, 'report'>
+  readonly engine: Pick<EngineForSources, 'bindThread' | 'threadClosed'> & Pick<EngineForExecutor, 'report' | 'followForContext'>
   readonly commands: Commands
   readonly sources: SourceRegistry
   /** Throws when accessed before initial setup completes. */
@@ -61,6 +61,7 @@ export function sourceContextOf(deps: SourceContextDeps, kind: { kind: string; h
       open: () => store.tickets.open(),
       block: (id, summary) => { store.atomic(() => deps.engine.report(id, { state: 'blocked', summary })) },
       bindThread: (id, thread, own) => { deps.engine.bindThread(id, thread, own) },
+      followForContext: (id, thread) => deps.engine.followForContext(id, thread),
       threadClosed: (thread, outcome, at) => { deps.engine.threadClosed(thread, outcome, at) },
     },
     triggers: { get: id => store.triggers.get(id), latest: thread => store.read.threadTriggers(thread, 1)[0] },

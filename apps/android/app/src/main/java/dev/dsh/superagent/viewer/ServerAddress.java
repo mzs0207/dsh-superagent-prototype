@@ -4,6 +4,8 @@ import java.net.URI;
 
 /** Validates one private HTTP origin and confines every WebView request to that origin. */
 final class ServerAddress {
+    private static final java.util.regex.Pattern CONVERSATION_WRITE = java.util.regex.Pattern.compile(
+            "/api/conversations(?:/[A-Za-z0-9_-]{1,160}/(?:messages|stop))?");
     private ServerAddress() { }
 
     static String parse(String value) {
@@ -33,11 +35,15 @@ final class ServerAddress {
         }
     }
 
-    static boolean contains(String origin, String address) {
+    static boolean contains(String origin, String address) { return allows(origin, address, "GET"); }
+
+    static boolean allows(String origin, String address, String method) {
         try {
             URI expected = new URI(origin), actual = new URI(address);
-            return "http".equals(actual.getScheme()) && actual.getRawUserInfo() == null
-                    && expected.getHost().equals(actual.getHost()) && port(expected) == port(actual);
+            if (!"http".equals(actual.getScheme()) || actual.getRawUserInfo() != null
+                    || !expected.getHost().equals(actual.getHost()) || port(expected) != port(actual)) return false;
+            return "GET".equals(method) || ("POST".equals(method) && actual.getRawQuery() == null
+                    && actual.getRawFragment() == null && CONVERSATION_WRITE.matcher(actual.getRawPath()).matches());
         } catch (Exception error) { return false; }
     }
 

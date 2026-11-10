@@ -15,10 +15,12 @@ import type { ResourceHost } from '../resources.ts'
 import { tool, type Tool } from './tool.ts'
 
 export interface ZentaoWorkflow {
-  head?: string; reproduction?: string; tests?: string
+  head?: string; reproduction?: string; tests?: string; cause?: string; changes?: string
   mr?: number; mergeCommit?: string
   testDirectory?: string; testCommit?: string; testBase?: string; testVerification?: string
   receipt?: string; published?: boolean; resolved?: boolean; failureSeen?: string
+  deployment?: { at: string; builds: { number: number; service: string; url: string; commit: string }[] }
+  liveVerification?: string
 }
 export interface ZentaoToolsHost {
   readonly store: Pick<Store, 'tickets' | 'replyStatus' | 'atomic'>
@@ -30,7 +32,7 @@ const Proof = z.string().trim().min(1).max(8000)
 const Action = z.discriminatedUnion('action', [
   z.object({ action: z.literal('read') }).strict(),
   z.object({ action: z.literal('file'), file_id: z.number().int().positive() }).strict(),
-  z.object({ action: z.literal('verified'), head: Sha, reproduction: Proof, tests: Proof }).strict(),
+  z.object({ action: z.literal('verified'), head: Sha, reproduction: Proof, tests: Proof, cause: Proof, changes: Proof }).strict(),
   z.object({ action: z.literal('merge'), mr: z.number().int().positive() }).strict(),
   z.object({ action: z.literal('sync_test') }).strict(),
   z.object({ action: z.literal('publish_test'), verification: Proof, services: z.array(z.string().regex(/^[a-z][a-z0-9-]*$/)).min(1).max(30) }).strict(),
@@ -74,7 +76,7 @@ export function zentaoTools(host: ZentaoToolsHost, initial: Ticket): Tool[] {
       if (args.action === 'read') return { ...state.resolved ? { resolution_confirmed: true } : { bug: await client.bug(bugId) },
         workflow: state, test_api: config.testApi, release_helper: helper }
       const latest = latestReport(ticket)
-      if (latest?.state === 'blocked' || latest?.state === 'failed') throw new Error('This bug is paused; use the panel Retry action before continuing')
+      if (latest?.state === 'blocked' || latest?.state === 'failed') throw new Error('This bug is paused; wait for a panel Retry or an authorized notification-topic resume')
       const directory = ticket.execution?.directory
       if (!directory) throw new Error('The ticket has no prepared worktree')
       const commands = host.repository.commands.withSignal(signal)
@@ -104,7 +106,7 @@ export function zentaoTools(host: ZentaoToolsHost, initial: Ticket): Tool[] {
         if (head !== args.head || (await commands.git(['status', '--porcelain'], directory)).trim()) throw new Error('Verification must name the clean current HEAD')
         // Fail before merging when the actual release path or credentials are unavailable.
         await commands.run('python3', [helper, 'check', '--repository', directory], directory)
-        Object.assign(state, { head, reproduction: args.reproduction, tests: args.tests }); persist()
+        Object.assign(state, { head, reproduction: args.reproduction, tests: args.tests, cause: args.cause, changes: args.changes }); persist()
         return { verified: true, head }
       }
       if (!state.head || !state.reproduction || !state.tests) throw new Error('Reproduce the bug, test the fix and record verified HEAD first')
@@ -148,7 +150,9 @@ export function zentaoTools(host: ZentaoToolsHost, initial: Ticket): Tool[] {
       if (receipt.repository !== directory || receipt.mergeCommit !== state.mergeCommit || receipt.testCommit !== state.testCommit) throw new Error('Release receipt does not match this verified ticket')
       const release = z.object({ testCommit: Sha, builds: z.array(z.object({ number: z.number(), service: z.string(), url: z.string(), commit: Sha })).min(1) })
         .parse(JSON.parse(await commands.run('python3', [helper, 'verify', '--receipt', state.receipt], directory)))
-      if (release.testCommit !== state.testCommit) throw new Error('Jenkins deployed another commit')
+      if (release.testCommit !== state.testCommit || release.builds.some(build => build.commit !== state.testCommit)) throw new Error('Jenkins deployed another commit')
+      // Keep proven deployment and live verification even if writing the ZenTao resolution fails.
+      Object.assign(state, { deployment: { at: new Date().toISOString(), builds: release.builds }, liveVerification: args.verification }); persist()
       const summary = `已修复并完成测试环境验证。\n复现：${state.reproduction}\n修复测试：${state.tests}\nMR: ${deployment.webUrl}/-/merge_requests/${state.mr}\ndevelop: ${state.mergeCommit}\ntest: ${state.testCommit}\n测试分支验证：${state.testVerification}\n部署：${release.builds.map(build => `${build.service} ${build.url}`).join('\n')}\n发布后复验：${args.verification}`
       await client.resolve(bugId, args.resolved_build, `resolved-${ticket.id}`, summary)
       state.resolved = true; persist()

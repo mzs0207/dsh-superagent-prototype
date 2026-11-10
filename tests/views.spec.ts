@@ -319,3 +319,35 @@ it('reads each ticket a page\'s follow-ups reached once, and nothing for a messa
   expect(followupOwners(store.triggers.get('f3')!, records)).toEqual([])
   expect([records.tickets.get, records.threads.get].map(read => read.mock.calls.length)).toEqual([0, 0])
 })
+
+it('never presents a published test revision or legacy resolution as verified deployment evidence', () => {
+  const host = views()
+  live('delivery')
+  store.triggers.save({ ...message('e0', { source: 'zentao', id: '' }, false), meta: { repository: 'https://git.invalid/acme/app' } })
+  store.set(KV.zentao.workflow('delivery'), { head: 'a'.repeat(40), testCommit: 'b'.repeat(40), published: true, resolved: true,
+    receipt: '/private/release.json', testDirectory: '/private/work' })
+  const card = ticketDetail(host, 'delivery')?.delivery
+  expect(card?.workflow).toMatchObject({ published: true, resolved: true, testCommit: 'b'.repeat(40) })
+  expect(card?.workflow?.deployment).toBeUndefined()
+  expect(card?.workflow?.liveVerification).toBeUndefined()
+  expect(JSON.stringify(card)).not.toMatch(/private|receipt|testDirectory/)
+})
+
+it('keeps confirmed deployment evidence separate from a blocked resolution and rejects unsafe artifact links', () => {
+  const host = views()
+  live('delivery')
+  const ticket = store.tickets.get('delivery')!
+  store.tickets.save({ ...ticket, attention: { id: 'attention', question: 'Confirm issue access' },
+    assignments: [{ id: 'a', state: 'running', createdAt: at, report: { state: 'blocked', summary: 'Resolve permission denied', at } }] })
+  store.triggers.save({ ...message('e0', { source: 'zentao', id: '' }, false), meta: { repository: 'javascript:alert(1)' } })
+  store.set(KV.zentao.workflow('delivery'), { mr: 7, testCommit: 'b'.repeat(40), published: true, liveVerification: 'Original case passed',
+    deployment: { at, builds: [{ service: 'api', number: 8, commit: 'b'.repeat(40), url: 'https://ci.invalid/job/8' },
+      { service: 'worker', number: 9, commit: 'b'.repeat(40), url: 'javascript:alert(1)' }] } })
+  const card = ticketDetail(host, 'delivery')?.delivery
+  expect(card?.humanAction).toBe('Confirm issue access')
+  expect(card?.workflow?.deployment?.builds).toEqual([
+    { service: 'api', number: 8, commit: 'b'.repeat(40), url: 'https://ci.invalid/job/8' },
+    { service: 'worker', number: 9, commit: 'b'.repeat(40), url: undefined }])
+  expect(card?.workflow?.resolved).toBe(false)
+  expect(card?.workflow?.mr?.url).toBeUndefined()
+})

@@ -8,6 +8,7 @@ import type { SettingsView } from './views/settings.ts'
 import type { SourceStatusView } from './views/sources.ts'
 import type { DecisionListView, SearchView, ThreadDetailView, ThreadListView } from './views/threads.ts'
 import type { TicketListView } from './views/tickets.ts'
+import type { Conversations } from './conversations.ts'
 
 export const TICKET_FILTERS = ['open', 'person', 'working', 'idle', 'ended'] as const
 export const THREAD_FILTERS = ['subscribed', 'evaluating', 'recent', 'all'] as const
@@ -18,6 +19,11 @@ interface Paged { offset?: number; limit?: number }
 type Delivery = 'injected' | 'pending'
 
 export interface Api {
+  'GET conversations': { query?: { offset?: number }; response: Awaited<ReturnType<Conversations['list']>> }
+  'POST conversations': { body: { requestId: string }; response: Awaited<ReturnType<Conversations['create']>> }
+  'GET conversations/:id/history': { query: { through: number; before: number }; response: Awaited<ReturnType<Conversations['history']>> }
+  'POST conversations/:id/messages': { body: { requestId: string; text: string }; response: Awaited<ReturnType<Conversations['prompt']>> }
+  'POST conversations/:id/stop': { response: ReturnType<Conversations['stop']> }
   'GET state': { response: StateView }
   'GET overview': { response: OverviewView }
   'GET search': { query: { q: string }; response: SearchView }

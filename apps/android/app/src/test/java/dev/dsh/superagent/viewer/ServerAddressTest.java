@@ -28,4 +28,19 @@ public class ServerAddressTest {
         assertFalse(ServerAddress.contains(origin, "file:///etc/passwd"));
         assertFalse(ServerAddress.contains(origin, "http://192.168.1.50/"));
     }
+    @Test public void permitsOnlyConversationWritesOnTheSelectedOrigin() {
+        String origin = "http://192.168.1.50:3083";
+        assertTrue(ServerAddress.allows(origin, origin + "/api/conversations", "POST"));
+        assertTrue(ServerAddress.allows(origin, origin + "/api/conversations/chat-1/messages", "POST"));
+        assertTrue(ServerAddress.allows(origin, origin + "/api/conversations/worker-t1/stop", "POST"));
+        assertTrue(ServerAddress.allows(origin, origin + "/api/conversations/chat-1/events", "GET"));
+        for (String path : new String[]{"/login", "/api/settings", "/api/tickets/t1/stop",
+                "/api/conversations/chat-1/delete", "/api/conversations/chat-1/messages?url=x",
+                "/api/conversations/%2e%2e/messages", "/api/conversations/chat-1%2fstop/messages"}) {
+            assertFalse(path, ServerAddress.allows(origin, origin + path, "POST"));
+        }
+        assertFalse(ServerAddress.allows(origin, "http://192.168.1.51:3083/api/conversations", "POST"));
+        assertFalse(ServerAddress.allows(origin, "http://192.168.1.50:3084/api/conversations", "POST"));
+        assertFalse(ServerAddress.allows(origin, origin + "/api/conversations/chat-1/messages", "DELETE"));
+    }
 }

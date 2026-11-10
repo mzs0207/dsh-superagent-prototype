@@ -4,19 +4,30 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="light dark">
-<title>Superagent 任务</title>
+<title>Superagent 任务与会话</title>
 <link rel="stylesheet" href="/view.css">
 <script src="/view.js" defer></script>
 </head>
 <body>
-<header><div><span class="eyebrow">SUPERAGENT · 只读</span><h1>任务</h1></div><button id="refresh" type="button">刷新</button></header>
+<header><div><span class="eyebrow">SUPERAGENT</span><h1 id="page-title">任务</h1></div><button id="refresh" type="button">刷新</button></header>
 <main>
-<div class="toolbar"><button id="back" type="button" hidden>返回列表</button><label id="filter-label">状态 <select id="filter" aria-label="任务状态"><option value="open">未结束</option><option value="working">执行中</option><option value="person">待处理</option><option value="idle">等待中</option><option value="ended">已结束</option></select></label></div>
+<nav class="tabs" aria-label="功能"><a id="tasks-tab" href="#state=open" aria-current="page">任务</a><a id="conversations-tab" href="#conversations">会话</a></nav>
+<div class="toolbar"><button id="back" type="button" hidden>返回列表</button><label id="filter-label">状态 <select id="filter" aria-label="任务状态"><option value="open">未结束</option><option value="working">执行中</option><option value="person">待处理</option><option value="idle">等待中</option><option value="ended">已结束</option></select></label><button id="new-conversation" type="button" hidden>新建会话</button></div>
 <div class="connection"><span id="connection" role="status">正在连接…</span><time id="updated"></time></div>
 <p id="error" role="alert" hidden></p>
 <section id="content" aria-label="任务内容" aria-busy="true"><p class="empty">正在读取任务…</p></section>
+<section id="chat" aria-label="会话内容" hidden>
+<h2 id="chat-title"></h2><p id="chat-info" class="source"></p>
+<div class="toolbar"><button id="older" type="button" hidden>加载更早消息</button><button id="stop-conversation" type="button" disabled>停止生成</button></div>
+<div id="stop-confirm" class="card" role="alertdialog" aria-label="确认停止" hidden><p id="stop-warning"></p><button id="confirm-stop" type="button">确认停止</button><button id="cancel-stop" type="button">取消</button></div>
+<div id="messages"></div>
+<article id="live" class="card message assistant" hidden><strong>助手 · 回复中</strong><p id="live-text" class="prose"></p></article>
+<div id="pending"></div>
+<p id="chat-notice" role="status" hidden></p>
+<form id="composer"><label for="message">发送消息</label><textarea id="message" rows="3" maxlength="32000" placeholder="输入消息；执行中的会话会在下一步接收指令"></textarea><button id="send-message" type="submit" disabled>发送</button></form>
+</section>
 <nav id="pagination" aria-label="分页" hidden><button id="previous" type="button">上一页</button><span id="count"></span><button id="next" type="button">下一页</button></nav>
 </main>
-<footer>任务由电脑执行 · 此处仅供查看</footer>
+<footer>会话与任务均在所选电脑运行 · 仅限可信私网</footer>
 </body>
 </html>

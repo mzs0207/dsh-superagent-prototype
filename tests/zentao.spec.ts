@@ -15,7 +15,8 @@ import { Commands } from '../src/infra/commands.ts'
 import { testDeployment } from './fixtures/deployment.ts'
 import { KV } from '../src/kv.ts'
 import { guardZentaoReport, zentaoTools, type ZentaoToolsHost } from '../src/app/tools/zentao.ts'
-import { feishuKind } from '../src/sources/feishu.ts'
+import { feishuKind, pollThreads as pollFeishuThreads, feishuTriggerId } from '../src/sources/feishu.ts'
+import { receiveZentaoFollowup } from '../src/app/zentao-followup.ts'
 import { Outbox } from '../src/app/outbox.ts'
 import { Effects } from '../src/app/effects.ts'
 import { HealthBoard } from '../src/infra/health.ts'
@@ -97,7 +98,7 @@ function context(deployment = testDeployment()) {
     outbox, policy: () => ({ version: 'test', paused: false, evalTimeoutMs: 60_000, gate: () => ({ admissible: false, reason: 'test' }), revalidate: () => true, admitsInferred: () => false }) })
   const ctx = sourceContextOf({ store, sources, commands, deployment, engine, ready: Promise.resolve(), configured: () => true,
     receive: trigger => engine.receive(trigger), outbox }, zentaoKind)
-  return { store, ctx, engine, outbox, effects, advance: (ms: number) => { now += ms } }
+  return { store, ctx, engine, outbox, effects, sources, advance: (ms: number) => { now += ms } }
 }
 describe('Zentao intake', () => {
   it('paginates unclosed and admits only this product’s active assigned bugs, including the initial backlog', async () => {
@@ -286,6 +287,55 @@ describe('Zentao workflow boundaries', () => {
       expect(comments).toEqual([])
     } finally { await active.effects.drain(); sent.mockRestore(); active.store.close() }
   })
+  it.each(['before-discovery', 'after-empty-poll'] as const)('recovers the first offline notification reply after restart %s', async restart => {
+    const h = await worker()
+    let active: ReturnType<typeof context> = h, replied = false
+    const rootAt = String(Date.parse(h.ticket.createdAt)), replyAt = String(Date.now() + 1000)
+    const root = () => ({ message_id: 'om_notification', chat_id: 'oc_newprivate', create_time: rootAt,
+      sender: { id: 'cli_bot', sender_type: 'app' }, ...replied ? { thread_id: 'omt_notification' } : {} })
+    const lark = vi.spyOn(Commands.prototype, 'lark').mockImplementation(async args => {
+      if (args[1] === '+messages-send') return { message_id: 'om_notification' }
+      if (args[0] === 'api' && args[2] === '/open-apis/im/v1/messages/mget') return { items: [root()] }
+      if (args[1] === '+threads-messages-list') return { thread_id: 'omt_notification', has_more: false, messages: [
+        { message_id: 'om_firstcontinue', chat_id: 'oc_newprivate', create_time: replyAt, msg_type: 'text',
+          sender: { id: 'ou_operator', sender_type: 'user' }, content: '继续', root_id: 'om_notification', thread_id: 'omt_notification' },
+      ] }
+      throw new Error(`Unexpected Feishu operation: ${args[0]} ${args[1]}`)
+    })
+    const enable = () => {
+      notifications(active)
+      const settings = active.store.settings()
+      active.store.saveSettings({ ...settings, policy: { ...settings.policy, sources: { ...settings.policy.sources,
+        zentao: { allowed: [], admission: { bugs: { unlistedUnaddressed: 'inferred' } } } } } })
+      active.ctx.receive = trigger => receiveZentaoFollowup({ ...active, appId: 'cli_bot' }, trigger) ?? active.engine.receive(trigger)
+    }
+    try {
+      enable()
+      active.store.tickets.save({ ...h.ticket, resume: 'manual' })
+      const report = { state: 'blocked' as const, summary: 'Need reproduction details' }
+      const notice = guardZentaoReport(h.host, h.ticket, report)!
+      active.engine.report(h.ticket.id, report)
+      active.effects.start(); await active.outbox.sent()
+      expect(active.store.replyStatus(notice)).toBe('sent')
+      expect(active.ctx.threads.subscribed('feishu')).toEqual([])
+      expect(active.store.get(KV.feishu.chats)).toBeUndefined()
+      if (restart === 'after-empty-poll') {
+        await pollFeishuThreads(active.ctx)
+        expect(active.ctx.threads.subscribed('feishu').map(thread => thread.ref.id)).toContain('oc_newprivate:om_notification')
+        expect(active.store.get(KV.feishu.chats)).toMatchObject({ oc_newprivate: true })
+      }
+      await active.effects.drain(); active.store.close()
+      active = context(); enable(); replied = true
+      await pollFeishuThreads(active.ctx)
+      const resumed = active.store.tickets.get(h.ticket.id)!
+      expect(resumed.assignments.map(item => item.state)).toEqual(['ended', 'pending'])
+      expect(resumed.inputs).toEqual([expect.objectContaining({ kind: 'trigger', triggerId: feishuTriggerId('om_firstcontinue'), context: true })])
+      expect(active.store.triggers.get(feishuTriggerId('om_firstcontinue'))).toMatchObject({ human: true, meta: { direct: true } })
+      await pollFeishuThreads(active.ctx)
+      expect(active.store.tickets.get(h.ticket.id)!.assignments).toEqual(resumed.assignments)
+      expect(active.store.tickets.list().map(ticket => ticket.id)).toEqual([h.ticket.id])
+    } finally { await active.effects.drain(); lark.mockRestore(); active.store.close() }
+  })
   it.each(['bug', 'namespace', 'recipient', 'bot'] as const)('starts a separate topic when the %s changes', async boundary => {
     const h = await worker()
     const sent = vi.spyOn(h.ctx.commands, 'lark').mockResolvedValueOnce({ message_id: 'om_old' }).mockResolvedValue({ message_id: 'om_new' })
@@ -448,6 +498,32 @@ describe('Zentao workflow boundaries', () => {
       expect(requests.some(path => path.includes('/resolve'))).toBe(false)
       expect(h.store.tickets.get(h.ticket.id)!.assignments[0]!.report?.state).toBe('blocked')
     } finally { h.store.close() }
+  })
+  it.each(['resolve-denied', 'wrong-build'] as const)('preserves only confirmed delivery evidence after %s', async failure => {
+    const deployment = testDeployment({ provider: 'gitlab', origin: 'http://gitlab.invalid', projectId: 1 })
+    const h = await worker(deployment), sha = 'b'.repeat(40), merge = 'a'.repeat(40)
+    const receipt = join(directory, 'evidence.json'), work = join(directory, 'work')
+    const builds = [{ number: 7, service: 'api', url: 'https://ci.invalid/job/7', commit: failure === 'wrong-build' ? 'c'.repeat(40) : sha }]
+    const run = vi.spyOn(Commands.prototype, 'run').mockResolvedValue(JSON.stringify({ testCommit: sha, builds }))
+    try {
+      h.store.tickets.save({ ...h.ticket, execution: { name: 'evidence', directory: work, assignment: 'fix' } })
+      writeFileSync(receipt, JSON.stringify({ repository: work, mergeCommit: merge, testCommit: sha }))
+      h.store.set(KV.zentao.workflow(h.ticket.id), { head: merge, reproduction: 'failed before', tests: 'passed after', mr: 7,
+        mergeCommit: merge, testCommit: sha, testBase: merge, testDirectory: work, testVerification: 'test passed', published: true, receipt })
+      rows[0]!.assignedTo = { account: 'another-user' }
+      await expect(zentaoTools(h.host, h.ticket)[0]!.execute({ action: 'resolve', resolved_build: '82',
+        verification: 'Original scenario passed on deployed revision' }, new AbortController().signal))
+        .rejects.toThrow(failure === 'wrong-build' ? 'Jenkins deployed another commit' : /assigned/)
+      const state = h.store.get(KV.zentao.workflow(h.ticket.id))!
+      expect(state.resolved).not.toBe(true)
+      if (failure === 'wrong-build') {
+        expect(state.deployment).toBeUndefined(); expect(state.liveVerification).toBeUndefined()
+      } else {
+        expect(state.deployment?.builds).toEqual(builds)
+        expect(state.liveVerification).toBe('Original scenario passed on deployed revision')
+      }
+      expect(requests.some(path => path.includes('/resolve'))).toBe(false)
+    } finally { run.mockRestore(); h.store.close() }
   })
   it('cherry-picks with the configured agent identity when the host has no Git user configured', async () => {
     const deployment = testDeployment({ provider: 'gitlab', origin: 'http://gitlab.invalid', projectId: 1 })

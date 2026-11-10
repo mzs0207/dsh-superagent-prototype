@@ -1,4 +1,4 @@
-/** Explicit setup/start commands for the opt-in HTTP viewer; never changes the DSH profile. */
+/** Explicit setup/start commands for the private mobile gateway; never changes the DSH profile. */
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
@@ -8,13 +8,13 @@ import { hashPassword, loopbackOrigin, privateAddress, startGateway } from './ga
 
 const Config = z.object({ host: z.string().refine(privateAddress), port: z.number().int().min(1).max(65535),
   upstream: z.string().transform(loopbackOrigin), password: z.object({ salt: z.string().regex(/^[a-f0-9]{32}$/), hash: z.string().regex(/^[a-f0-9]{64}$/) }) }).strict()
-const help = `Superagent Android task viewer (read-only, trusted LAN HTTP)
+const help = `Superagent Android tasks and conversations (trusted LAN HTTP)
   pnpm mobile setup --host <LAN-IPv4> [--port 3083] [--upstream http://127.0.0.1:3082]
-  pnpm mobile start        Run the HTTP viewer in the foreground
+  pnpm mobile start        Run the mobile gateway in the foreground
   pnpm mobile password     Change the access password; restart the viewer afterwards
 All commands accept --state-dir <private-directory> (default ~/.dsh/state/superagent-mobile).
 Setup/password ask for a hidden password, or read it from stdin when piped.
-HTTP sends passwords and task content in plaintext: use only a trusted LAN.
+HTTP sends passwords, tasks and conversation content in plaintext: use only a trusted LAN.
 No listener or DSH profile changes occur until start.`
 async function readPassword(): Promise<string> {
   if (!process.stdin.isTTY) {
@@ -73,7 +73,7 @@ async function main() {
     return
   }
   const gateway = await startGateway(config)
-  console.log(`Read-only task viewer: ${gateway.origin}\nTrusted LAN HTTP only. Press Ctrl+C to stop.`)
+  console.log(`Mobile tasks and conversations: ${gateway.origin}\nTrusted LAN HTTP only. Press Ctrl+C to stop.`)
   let closing = false
   const close = () => { if (!closing) { closing = true; void gateway.close().catch(() => { process.exitCode = 1 }) } }
   process.once('SIGINT', close); process.once('SIGTERM', close)

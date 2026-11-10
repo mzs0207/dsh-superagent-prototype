@@ -171,6 +171,10 @@ export class Tickets extends EnginePart {
     if (!canRetry(ticket) || !latest) throw new UserError('notRetryable')
     this.endAssignment(ticket, latest, 'retried')
     this.requeueUntaken(ticket, latest)
+    // Context received during a manual hold has never been delivered; an explicit retry releases it too.
+    const held = ticket.inputs.filter(input => input.kind === 'trigger' && input.context && !input.deliveredTo
+      && !ticket.undelivered.includes(input.id))
+    ticket.undelivered.push(...held.map(input => input.id))
     const assignment = this.newAssignment(ticket)
     ticket.updatedAt = this.now()
     this.repo.tickets.save(ticket)
@@ -234,8 +238,8 @@ export class Tickets extends EnginePart {
   addInput(ticket: Ticket, input: TicketInput): void {
     if (ticket.inputs.some(existing => existing.id === input.id)) return
     ticket.inputs.push(input); ticket.updatedAt = this.now()
-    // Some delivery workflows require an explicit retry even when a person comments on their MR.
-    const held = liveTicket(ticket) && (automatic(input) || ticket.resume === 'manual') && waitsForPerson(ticket)
+    // Context cannot release a hold; some workflows also require an explicit retry for direct human follow-ups.
+    const held = liveTicket(ticket) && (automatic(input) || (input.kind === 'trigger' && input.context) || ticket.resume === 'manual') && waitsForPerson(ticket)
     if (!held) ticket.undelivered.push(input.id)
     this.repo.tickets.save(ticket)
     if (!liveTicket(ticket) || held) return

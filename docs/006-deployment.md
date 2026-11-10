@@ -167,7 +167,36 @@ For private ZenTao alerts, set **Settings → Sources → Feishu → ZenTao noti
 
 Each Bug's first notification is the root message; subsequent notifications reply inside its Feishu topic instead of adding separate messages to the chat. The root is stored durably and reused across service restarts and manual retries, independently of the Superagent ticket ID. Different ZenTao scopes, Bugs, bot applications or recipients use separate roots. This starts with the next notification after upgrading; older standalone messages are not moved or replayed. A failed topic reply stays pending for retry rather than silently sending another standalone message.
 
+To act on a notification, also enable **Receive direct messages** and add the fixed recipient to **Eval → On each Source → Feishu → allowed users**. In the original topic, ordinary replies add context without resuming a paused task. Send `继续` alone to request a retry of the uniquely matched live task; the host rechecks sender, bot/recipient scope and the task's current authorization. A global pause must first be lifted in the panel. Old commands from before the latest pause are refused. The reply confirms whether context was saved or a retry was accepted; duplicate events do not repeat the operation, including after restart. Panel Retry remains available and also releases saved context. Unrelated Feishu topics retain their ordinary routing.
+
+The Feishu recovery loop also discovers persisted notification roots for live ZenTao tickets, registers their private chat and context-only topic subscription, and starts history at the root message's timestamp. No prior inbound event is required: a first reply sent while the live stream was disconnected can be recovered after restart, including when the root initially had no topic replies. Discovery failures remain visible and retry on later rounds.
+
 Before sending the root, Outbox persists that creation request's ID and text. If its response is lost, later notifications first reconcile the same request rather than electing another root, even after the normal queue failure threshold or withdrawal of the original receipt. Feishu deduplicates an ID for one hour; retries beyond that remote window cannot guarantee exactly-once delivery.
+
+### Hindsight memory (optional)
+
+Create `<stateDir>/hindsight.json` with mode `0600`, outside the repository, then restart the DSH profile:
+
+```json
+{
+  "apiUrl": "https://memory.example.com",
+  "apiToken": "<private-token>",
+  "bankId": "omp",
+  "projectTag": "project:example-project",
+  "repository": "https://git.example.com/team/example-project"
+}
+```
+
+`repository` must exactly equal the active repository web URL. `projectTag` explicitly selects the existing OMP project's tag; it is not derived from changing worker directories. Recall uses a nonempty tag with `all_strict`, excludes untagged/other-project results again locally, and never treats memory as authorization. Tags provide logical retrieval isolation, not separate tenant access control. Use HTTPS except for a loopback server.
+
+The host uses this private file rather than depending on OMP's configuration loader. It does not expose the token through settings APIs, prompts or worker environment variables. Copy the connection details deliberately; changes to OMP settings do not silently change DSH. Removing the file and restarting disables reads/writes while preserving pending exports.
+
+Workers receive bounded history before their first assignment. Recall has a 10-second deadline; failure is shown under `memory` health and work continues without memory. Existing sessions keep their already-delivered context.
+
+Only future successful completions with a complete ZenTao verification chain are automatically retained: short root cause/change summaries, revision/build identifiers and confirmation facts. Original Bug bodies, transcripts and raw reproduction/test/live logs are excluded. Common credential-like text is rejected; authors must still keep secrets and personal data out of cause/change summaries. Ordinary `ready` reports, publication without deployment proof, and older checkpoints lacking these fields do not qualify. Other task types can recall without automatically exporting unproven conclusions.
+
+Exports use the existing durable effect queue and a stable document ID, with successful content fingerprints retained locally. Backend failures retry after 10 seconds with backoff up to five minutes; each synchronous retain attempt has a 60-second deadline and cannot reopen or fail the completed task. Pending exports never switch banks, repositories or tags when configuration changes. No existing task history is bulk-uploaded.
+
 
 ## Install
 
@@ -288,6 +317,8 @@ Health entries are grouped by responsibility:
 | --- | --- |
 | `runtime` | The application itself |
 | `models` | Sessions waiting on a model-budget retry |
+| `memory` | Private memory configuration and bounded Hindsight recall; failures do not block tasks |
+| `memory-retain` | Durable verified-summary exports and their retry state |
 | `evals` | Unavailable Evals from the last hour with no later judgement or dismissal |
 | `assessment`, `launch`, `delivery`, `relay`, `notice`, `reply` | Stored work described in [003 Execution](003-execution.md); delivery counts waiting work, while reply covers Channel messages |
 | `worker` | Executor Session event handling; appears after its first failure |

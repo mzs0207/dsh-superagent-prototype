@@ -31,6 +31,13 @@ A human follow-up still owned by an Executor is marked **Delivered to Ticket**, 
 
 Ticket details show the originating Trigger, Decision and reason, scope and Policy version. Assignments and secondary details are folded below the immediate actions. **Retry** is available for failed Input delivery or a Ticket waiting for a person after a blocked or failed Report. Ended Tickets show outcomes such as **Pull request merged** or **Stopped by a person**.
 
+### Delivery evidence
+
+Each Ticket has a **Delivery evidence / 交付验收** card with its scope, latest conclusion and outstanding human action. ZenTao cards also show recorded root cause/change scope, before/after verification, tested HEAD, MR, develop/test commits, test-worktree checks, publication, confirmed Jenkins build links/SHAs and post-deployment verification. `published` means pushed to test, not deployed. Missing or older checkpoint fields read **No evidence recorded**, never inferred success. Deployment/live evidence is kept even when writing the final ZenTao resolution fails; it remains historical evidence, not proof of the environment's current version.
+
+Supplementary topic Inputs waiting behind a hold are marked **Context saved; awaiting explicit resume**, not delivered. Retry releases these Inputs without creating a new Ticket.
+
+
 ## Settings groups
 
 - **Sources:** one card per Source with its switch, fields and verified account facts. GitHub also offers receive-all switches for new Issues, pull requests, comments and default-branch CI. Polling and read limits are under Advanced.

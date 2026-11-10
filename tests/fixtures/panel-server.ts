@@ -205,6 +205,7 @@ export const acceptDecision = (): NonNullable<TicketPageView['decision']> => ({ 
   triggerIds: ['e1'], thread: 'feishu:oc_1:om_root', rules: [], preview: '@bot 修一下', ticketTitle: undefined })
 const ticketDetail = (): TicketPageView => ({
   ...ticketSummary(), paused: false, decision: acceptDecision(), threads: [threadSummary()],
+  delivery: { scope: '修复登录页回归', summary: 'working on it', humanAction: undefined, workflow: undefined },
   mandate: { strength: 'explicit', policyVersion: 'abcdef1234567890', basis: { via: 'addressed', sender: 'Alice', addressed: 'mention' },
     actor: actor('feishu', MEMBER), scope: '修复登录页回归' },
   basis: { facts: [{ name: 'sender', value: 'Alice' }, { name: 'addressed', value: 'mention' }], legacy: false },
@@ -290,6 +291,12 @@ const ticketOf = (id: string) =>
 const SourceSave = z.object({ enabled: z.boolean(), config: z.unknown() })
 
 const ROUTES: { [K in keyof Api]: Route<K> } = {
+  // The desktop panel fixture has no DSH session runtime; mobile API tests use fixtures/host.ts.
+  'GET conversations': { query: ['offset'], answer: () => refuse(404, 'No conversation runtime') },
+  'POST conversations': { body: true, answer: () => refuse(404, 'No conversation runtime') },
+  'GET conversations/:id/history': { query: ['through', 'before'], answer: () => refuse(404, 'No conversation runtime') },
+  'POST conversations/:id/messages': { body: true, answer: () => refuse(404, 'No conversation runtime') },
+  'POST conversations/:id/stop': { answer: () => refuse(404, 'No conversation runtime') },
   'GET state': { answer: stateView },
   'GET overview': { answer: overviewView },
   'GET search': { query: ['q'], answer: async ({ query }) => {

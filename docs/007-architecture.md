@@ -177,6 +177,7 @@ Failures retry with exponential backoff. Throwing `Later` defers work without co
 | `relay` | Sessions | Steers a worker's report or question, or a person's follow-up, into the main Session's turn | 1, in queue order | 2 s doubling to 60 s |
 | `notice` | Sessions | Injects a notice into the main Session without waking it | 1, in queue order | 2 s doubling to 60 s |
 | `reply` | Outbox | Sends a message for a Channel through its Source, after the earlier messages of its Ticket to its conversation that have not failed three times; withdrawing the message cancels it | 1, none while paused | 5 s doubling to 300 s; one whose Source is off, or behind an earlier message, tries again after 5 s |
+| `memory-retain` | HindsightMemory | Retains a verified repair summary in its pinned connection/project scope; confirms the synchronous response and stores a content fingerprint | 1, none while paused or unconfigured | 10 s doubling to 300 s; stable document IDs survive retries/restarts |
 
 Each kind has a health entry under its name. It reports an error once one of its effects failed three times in a row, except `delivery`, whose failures show on their Ticket instead. Relays keep their order, and so do notices; a failed one holds back the later ones of its kind.
 
@@ -198,6 +199,12 @@ That context supplies deployment and commands, setup readiness (`ready`, `config
 ZenTao is an independent Source (`sources/zentao.ts`, `zentao-client.ts`). Its ticket-scoped tools keep verification/release checkpoints in the existing KV store. Such tickets set `completion: "report"` (MR closure records a fact but does not end delivery) and `resume: "manual"` (blocked inputs remain context until an operator retries). The ordinary lifecycle remains unchanged. Failed/blocked notices and human-action replies use the durable outbox. At delivery, Outbox sends ZenTao messages privately through the enabled Feishu bot when `notificationOpenId` is set, keeping the same receipt/idempotency ID and retrying failures without falling back to comments. Otherwise native comment IDs are reconciled against the bug's action history. Successful resolution evidence stays in ZenTao. The release helper persists the exact cherry-picked commit under the Git common directory and per-service Jenkins receipts outside worktrees.
 
 `KV.zentao.feishuTopic` stores the Feishu root message ID keyed by ZenTao channel thread, bot application and notification recipient. `feishuTopicStart` durably fixes the first creation request's ID and text before calling Feishu. An uncertain outcome is retried with that same request, including when a later notice is released after queue failures or the original receipt was withdrawn. The confirmed root is persisted before any later notice replies to it; the original receipt can subsequently settle without sending its content again. Later notices use `im +messages-reply --reply-in-thread`; restarts and replacement tickets for the same Bug retain the root. No new database table or settings are needed.
+Before first inbound replies, the Feishu recovery loop enrols persisted notification roots for live, in-scope ZenTao tickets. It resolves and checks the root's bot/chat, records the private-chat cursor, and uses context-only subscriptions anchored at the remote root timestamp. This recovers first replies missed by the live stream, including after restart or an initial root with no replies; discovery failures do not stop subsequent recovery rounds.
+
+### Hindsight memory
+
+`HindsightMemory` reads only the host's private `hindsight.json`, binds it to the active repository URL and explicitly configured project tag, and adds a bounded recall result to the first worker assignment. Its `memory` health entry is independent of task success. Completion events enqueue `memory-retain` only for complete, resolved ZenTao verification checkpoints; the queue payload contains a credential-free summary and connection-scope fingerprint, not authentication material. The existing KV namespace records successful content fingerprints, so repeated completion notices do not duplicate successful exports. The token never enters the settings store or model-facing resources.
+
 
 
 ### DshExecutor
@@ -338,6 +345,8 @@ Generic modules have the following deliberate Source-specific boundaries:
 | `src/app/sessions.ts` | Sessions |
 | `src/app/delivery.ts` | `AgentDelivery`: delivers a message to a DeepSeek Harness agent once per request id, also across a restored Session |
 | `src/app/retry-health.ts` | `RetryHealth`: which Sessions wait on a model budget retry, for the `models` health entry |
+| `src/app/zentao-followup.ts` | Persisted notification-root correlation, allowed-recipient checks, context-only intake, explicit same-ticket retry and durable confirmation; known refused topics never become new candidates |
+| `src/app/memory.ts` | Private Hindsight connection, repository-scoped bounded recall, verified-summary export and durable retention receipts |
 | `src/app/role-models.ts` | Resolves the Eval and Executor models, and seeds a new Session with its role's model |
 | `src/app/assessment.ts` | The MasterAssessor, the assessment schema and the window `orchestrator_eval` answers |
 | `src/app/execution-environment.ts` | The execution environment: its variables, a Ticket's values, the directory root and the lines of the prompt section, which `src/app/prompts.ts` fills into its template |
@@ -351,9 +360,11 @@ Generic modules have the following deliberate Source-specific boundaries:
 | `src/app/tools/zentao.ts` | Ticket-scoped reproduction/verification checkpoints, guarded develop merge, fix-only test publication and confirmed resolution; failures block and notify |
 | `src/app/http.ts` | The `/orchestrator/api` routes: the same-origin check, request limits and one status per kind of failure |
 | `src/app/api.ts` | `Api`, every route with its parameters, query, body and response, and the filters of the lists; it imports only types, so the panel bundles it |
+| `src/app/conversations.ts` | Shared DSH session list/create/history/prompt/cancel adapter and projected SSE; task-worker stopping goes through the ticket engine, with no duplicate session persistence |
 | `src/app/views/text.ts` | The two forms of a view's text: `preview`, plain text on one line, and `markdown` without HTML; `plain` and `readable` |
 | `src/app/views/records.ts` | The rows the views share: Triggers, Tickets, Threads, Decisions and Channel links, and `ownersOf`, the owners of follow-ups as one request reads them |
 | `src/app/views/tickets.ts` | The Ticket lists by stage, a Ticket's page, the Mandate basis facts and the Executor's load |
+| `src/app/views/delivery.ts` | Evidence-only delivery-card projection and mobile field/HTTP(S)-link allowlist; no receipt paths, inferred deployment success or filesystem reads |
 | `src/app/views/threads.ts` | The Thread lists, a Thread's timeline, the search and the Decision list |
 | `src/app/views/sources.ts` | The Source status: each Source instance's state, its last day's counts, and what it filtered and dropped in that day |
 | `src/app/views/settings.ts` | The settings page's view: each block with its revision, each Source's settings with its kind's form, and the execution environment |
@@ -406,11 +417,13 @@ Generic modules have the following deliberate Source-specific boundaries:
 | `src/client/marks.ts` | The marks of the states the views classify: a Ticket's or a Thread's stage, a Source's state and a Decision's outcome, each as a dot, an icon, a tone and a label |
 | `src/client/locales.ts` | All copy in both languages, and the glossary of [001 Domain model](001-domain.md) |
 | `src/client/client.css`, `css.d.ts` | The panel's stylesheet, loaded as text |
-| `src/mobile/gateway.ts` | Opt-in LAN HTTP listener: password login, bounded authentication, fixed loopback task reads, explicit response projections and no task mutations |
+| `src/mobile/gateway.ts` | Private HTTP listener: password login, bounded authentication, fixed loopback task projections, allowlisted JSON conversation writes and cancellable SSE forwarding |
 | `src/mobile/cli.ts` | Private password-hash setup, password changes and foreground viewer lifecycle; leaves the DSH profile unchanged |
-| `src/mobile/view.html`, `view.js`, `view.css` | Touch task list/detail page, safe text rendering, filters/pagination and visibility-aware polling |
+| `src/mobile/view.html`, `view.js`, `view.css` | Touch task/conversation tabs, safe text rendering, pagination/history, in-page drafts, stable submission IDs and visibility-aware polling/streaming |
 | `src/mobile/login.html`, `login.js` | Password-only web login; no credentials in URLs or browser storage |
-| `apps/android/app/src/main/java/dev/dsh/superagent/viewer/MainActivity.java`, `ServerAddress.java` | Minimal Android WebView shell and strict private HTTP origin confinement |
+| `apps/android/app/src/main/java/dev/dsh/superagent/viewer/MainActivity.java`, `ServerAddress.java` | Native server selection/login, isolated WebView sessions, strict private origin confinement and conversation-only POST paths |
+| `apps/android/app/src/main/java/dev/dsh/superagent/viewer/ServerDiscovery.java`, `DiscoveryTargets.java`, `GatewayClient.java` | Bounded private /24 HTTP discovery, saved-origin probing and explicit redirect-free native login |
+| `apps/android/app/src/main/java/dev/dsh/superagent/viewer/ServerStore.java`, `PasswordCipher.java` | Saved server metadata and Android Keystore AES-GCM credentials bound to origin and server fingerprint |
 
 `src/sources/github.ts` and `src/sources/feishu.ts` are also the entries of the two Source plugins, built by `tsdown.config.ts` and exported in `package.json` as `./github-watch` and `./feishu-watch`. The bundle's `cordis.patch.yml` inserts the three plugins, with Feishu disabled.
 
@@ -439,15 +452,20 @@ Generic modules have the following deliberate Source-specific boundaries:
 | `tests/cache.spec.ts` | `TextCache` |
 | `tests/queue.spec.ts` | The Runtime's work through the effect queue, and what earlier versions stored |
 | `tests/followups.spec.ts` | A person's follow-up on a Ticket's Thread: its notice to the main Session, the tools that act on it, what a burst costs; a worker's hand-back and context follow, and the main Session's note |
+| `tests/zentao-followup.spec.ts` | Runtime notification replies: context holds, authorized explicit resume, duplicate/stale commands, scope/actor/ended/ambiguous boundaries, panel retry and unchanged unrelated intake |
 | `tests/health.spec.ts` | One health entry per part, each cleared by its own next success |
 | `tests/delivery.spec.ts` | `AgentDelivery` |
 | `tests/retry-health.spec.ts`, `tests/role-models.spec.ts` | Model budget retries, and the models of the two roles |
+| `tests/memory.spec.ts` | Runtime memory isolation, credential/log exclusion, unavailable/redirecting backends, proof-gated export, private configuration and persisted retry/deduplication |
 | `tests/runtime.spec.ts` | The whole application on a simulated DeepSeek Harness host, through tools and HTTP |
 | `tests/tools.spec.ts` | The Sessions' tools: what `orchestrator_read` reads for each role, and the shapes and checks of the other main Session tools |
 | `tests/runtime-concurrency.spec.ts` | Work that overlaps: Triggers during a pass, Tickets that change during deliveries and launches |
 | `tests/http.spec.ts` | The same-origin and loopback checks, the status of each kind of failure, the body limit, path parameters and queries |
-| `tests/mobile.spec.ts` | Real HTTP password login, session cookies, cross-origin/method/path restrictions, password body limits, explicit task fields and upstream failures |
-| `apps/android/app/src/test/java/dev/dsh/superagent/viewer/ServerAddressTest.java` | Private numeric HTTP addresses and same-origin confinement, including credential and prefix-confusion attacks |
+| `tests/mobile.spec.ts` | Real HTTP password login, credential-free discovery and stable fingerprints, session cookies, cross-origin/method/path restrictions, password body limits, explicit task fields and upstream failures |
+| `tests/conversations.spec.ts` | Conversation projection/privacy, retained interrupted history and failure status, concurrent/claimed-message deduplication, input admission boundaries and real ticket-engine/background-work stopping |
+| `apps/android/app/src/test/java/dev/dsh/superagent/viewer/ServerAddressTest.java` | Private numeric HTTP origins and conversation-write confinement, including credential, port, path and prefix-confusion attacks |
+| `apps/android/app/src/test/java/dev/dsh/superagent/viewer/DiscoveryTargetsTest.java` | Private /24 scope, saved custom-port priority, subnet deduplication and exclusion of public/loopback scans |
+| `apps/android/app/src/test/java/dev/dsh/superagent/viewer/PasswordCipherTest.java` | Unicode secret restoration, randomized AES-GCM encryption, cross-origin/instance rejection and tamper/truncation rejection |
 | `tests/settings.spec.ts` | Settings saves that race a model or account check, a Policy sync that a save outran, and the refusals of the pause, a sync and a block |
 | `tests/views.spec.ts` | What the management views derive from the Store, such as the Thread a dropped message belongs to |
 | `tests/timeline.spec.ts` | A Thread's pages and a Trigger's neighbours by time and then id, with every received Trigger's time in one form |
@@ -495,6 +513,7 @@ A generated column is computed from its row's JSON and is empty outside its set,
 | Prompt versions | `prompt-revision`, `prompt-version:<n>` |
 | Main Session | `master-id` |
 | Session prompt history | `session-prompts:<session id>` |
+| Memory retention | `memory-retained:<connection/document key>`: the last successfully retained summary fingerprint |
 | Source state | Read positions such as `github-cursor:<number>`, PR CI fingerprints and seen Feishu-topic messages; keys begin with the kind or `thread-` plus a Thread key |
 | Display names | `source-labels:<source id>` |
 
