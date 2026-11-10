@@ -28,9 +28,11 @@ import { sourcesStatus, type SetupState } from './views/sources.ts'
 import { decisionList, search, threadDetail, threadList } from './views/threads.ts'
 import { executorLoad, ticketDetail, ticketList } from './views/tickets.ts'
 import { Conversations } from './conversations.ts'
+import type { OptimizationLedger } from './optimization.ts'
 
 export interface HttpHost {
   readonly store: Store
+  readonly optimization: Pick<OptimizationLedger, 'records' | 'summary' | 'lessons' | 'saveLesson'>
   /** Feishu message links resolved since startup, used by search to match AppLink URLs. */
   readonly sourceLinks: Pick<TextCache, 'entries'>
   readonly sources: SourceRegistry
@@ -160,6 +162,10 @@ function routes(runtime: HttpHost, conversations: Conversations): Routes {
   const ticket = (id: string) => { if (!store.tickets.get(id)) throw new RouteError(404, 'Ticket not found'); return id }
   const promptBody = (input: { body: (maxBytes?: number) => Promise<unknown> }) => input.body(4 * runtime.machine.promptMaxChars.get() + 4096)
   return {
+    'GET optimization': ({ query }) => runtime.optimization.summary(query),
+    'GET optimization/records': ({ query }) => runtime.optimization.records(query),
+    'GET optimization/lessons': ({ query }) => runtime.optimization.lessons(query),
+    'POST optimization/lessons': async ({ body }) => runtime.optimization.saveLesson(await body()),
     'GET conversations': ({ query }) => conversations.list(query),
     'POST conversations': async ({ body }) => conversations.create(await body()),
     'GET conversations/:id/history': ({ params, query }) => conversations.history(params.id, query),

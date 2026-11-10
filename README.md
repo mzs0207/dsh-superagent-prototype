@@ -41,6 +41,8 @@ Read the numbered documents in order; each builds only on the ones before it.
 
 `pnpm check` runs the typecheck, the tests and the build.
 
+Before optimizing this project, read `scripts/dsh-superagent optimization` and `scripts/dsh-superagent optimization --view lessons`. Start with recurring observed problems, verify against current code, compare the same scenario before/after the smallest change, then record the measured result. Unverified ideas stay hypotheses. See [project optimization records](docs/006-deployment.md#project-optimization-records); no automatic self-modification is enabled.
+
 ## License
 
 [MIT](LICENSE)

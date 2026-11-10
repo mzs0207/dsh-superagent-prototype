@@ -324,6 +324,7 @@ Health entries are grouped by responsibility:
 | `worker` | Executor Session event handling; appears after its first failure |
 | `github`, `gitlab`, `zentao`, `feishu`, `history` | Source polling, events and history recovery |
 | `sync:<source id>` | Allowed-list synchronization |
+| `optimization` | Local structured evidence recording; recorder failure does not fail or resume tasks |
 
 A refusal has a status and `error`, its English text:
 
@@ -349,6 +350,53 @@ rev=$(curl -s -H 'x-orchestrator-request: 1' $api/settings | jq '.sources[] | se
 curl -s -X PUT -H 'x-orchestrator-request: 1' -H 'content-type: application/json' $api/settings/source:github \
   -d "{\"value\": {\"enabled\": true, \"config\": {\"repository\": \"acme/widgets\", \"cli\": \"$HOME/.local/bin/gh-agent\"}}, \"revision\": $rev}"
 ```
+
+## Project optimization records
+
+Rebuild and restart DSH to activate automatic recording; no APK/mobile-gateway upgrade or additional service is required. The ledger uses the existing private `<stateDir>/orchestrator.sqlite`. Runtime evidence is kept for 90 days, pruned at startup/on writes at most hourly, and excluded from queries once expired. Authored lessons remain independently of that retention. There is no historical backfill; recorder-error intervals have incomplete evidence.
+If recorder initialization fails, its health remains `error`; later events cannot mark an uninitialized recorder ready. Fix the storage problem and restart DSH to initialize recording again. Task execution is not blocked.
+
+Recorded facts: task/assignment lifecycle, worker report states, explicit retries, human input/resumption, scheduled worker retries, actual effect success/failure, and terminal prepare/launch/execution failure boundaries. Structured OS/provider properties yield `timeout`, `network`, `rate-limited` or `http-5xx`; otherwise the reason is `unknown`. `Later` holds (pause, worker slots, earlier messages) are not failures. No raw task titles, chats/reports, tool output, errors, accounts, recipients or credentials are copied.
+
+Records include hashed correlation keys, timestamps, duration, application version/build timestamp, settings/prompt revisions, model-configuration fingerprints and checkpoint-presence flags. Hashes are pseudonyms, not guaranteed anonymization. Checkpoint flags mean evidence was recorded, not that arbitrary text proves success. Task-end durations include waiting since creation; assignment-start durations measure launch wait; effect durations cover one attempt. These overlap: do not sum them or call them model time/token cost. `explicit-retry` can originate in the panel, an authorized follow-up or the main agent; human inputs/resumptions are separate observations, not distinct people.
+
+```sh
+scripts/dsh-superagent optimization
+scripts/dsh-superagent optimization --view records --limit 50
+scripts/dsh-superagent optimization --view lessons
+scripts/dsh-superagent optimization --since 2026-11-10T00:00:00Z --until 2026-11-11T00:00:00Z
+scripts/dsh-superagent optimization --lesson-file /path/to/reviewed-lesson.json
+```
+
+Use `--url` for another loopback HTTP port. Commands return one JSON page, never restart DSH, bypass ambient proxies and reject redirects. Management routes (existing same-origin checks and `x-orchestrator-request: 1` header):
+
+| Method/path under `/orchestrator/api/` | Result |
+| --- | --- |
+| `GET optimization` | Observation counts grouped by kind/component/status/reason, average/max durations, coverage and caveats |
+| `GET optimization/records` | Runtime evidence page |
+| `GET optimization/lessons` | Authored lesson page |
+| `POST optimization/lessons` | Validate/save an authored lesson |
+
+GET accepts timezone-qualified `since`/`until`, nonnegative `offset`, and `limit` 1–100. Lists return `items`/`next_offset`; pass the records response's fixed `until` on later pages. No optimization endpoint is exposed through the mobile gateway.
+
+Example unverified idea (not an observed result):
+
+```json
+{
+  "status": "hypothesis",
+  "problem": "Launch delays may cluster after repeated retries",
+  "change": "Inspect the launch boundary before changing retry policy",
+  "validation": "",
+  "effect": "",
+  "evidence": []
+}
+```
+
+After actual verification, submit `status: "verified"` with nonempty `validation`, observed `effect` and at least one `evidence` reference/result. This is an authored attestation, not an automated proof checker. Each text field is limited to 2000 characters, evidence to 20 entries; exact repeated submissions are idempotent. Review text for internal project names, real Bug/MR IDs, people and private infrastructure. Obvious credentials, private IPv4 addresses, email/Feishu identifiers and local user paths are rejected; pattern checks cannot replace review. Never paste logs/transcripts.
+
+Only verified sanitized lessons use the existing optional Hindsight connection and durable export queue. They carry `project:dsh-superagent-prototype:optimization` and `purpose:project-optimization`, without the business repository tag/namespace. Runtime observations and hypotheses remain local; missing/unavailable memory does not prevent local use. Failed exports survive restarts; locally verified lessons are revisited when the connection loads. Existing business-repair recall stays unchanged and does not consume this separate project tag.
+
+Future workflow: read report/lessons → inspect evidence/current code → make the smallest justified change → measure the same scenario → record problem/change/validation/effect/evidence. History is a reference, not an instruction or authorization; nothing automatically changes code, prompts, policies or permissions.
 
 ## Setup checks
 

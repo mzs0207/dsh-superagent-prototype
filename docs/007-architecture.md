@@ -206,6 +206,12 @@ Before first inbound replies, the Feishu recovery loop enrols persisted notifica
 `HindsightMemory` reads only the host's private `hindsight.json`, binds it to the active repository URL and explicitly configured project tag, and adds a bounded recall result to the first worker assignment. Its `memory` health entry is independent of task success. Completion events enqueue `memory-retain` only for complete, resolved ZenTao verification checkpoints; the queue payload contains a credential-free summary and connection-scope fingerprint, not authentication material. The existing KV namespace records successful content fingerprints, so repeated completion notices do not duplicate successful exports. The token never enters the settings store or model-facing resources.
 
 
+### Project optimization evidence
+
+`OptimizationLedger` owns additive `optimization_record` / `optimization_lesson` tables in the existing SQLite file and a typed first-activation KV key. Runtime observes domain events inside command transactions; `assignment.reported` carries only report state and `ticket.human-input` only the input identifier. Stable lifecycle keys suppress duplicate starts; distinct reports remain distinct within one millisecond. Effects report real attempts, not `Later` holds; DshExecutor records scheduled retries, direct human input and terminal failure boundaries. Nested savepoints isolate recording failure, and domain rollback leaves no false evidence. The independent `optimization` health entry reports failure. Runtime evidence expires after 90 days; authored lessons persist separately.
+
+Bounded loopback queries and `scripts/dsh-superagent optimization` expose evidence/reports and explicit lesson submission, not a new service or mobile write path. Verified lessons require validation/effect/evidence and share `memory-retain`, with a distinct scope discriminator and `project:dsh-superagent-prototype:optimization` / `purpose:project-optimization` tags, never the business repository tags. Existing KV receipts deduplicate successful exports; startup revisits verified local lessons. Hypotheses and raw runtime observations never leave the ledger. No automatic diagnosis or self-modification occurs.
+
 
 ### DshExecutor
 
@@ -347,6 +353,7 @@ Generic modules have the following deliberate Source-specific boundaries:
 | `src/app/retry-health.ts` | `RetryHealth`: which Sessions wait on a model budget retry, for the `models` health entry |
 | `src/app/zentao-followup.ts` | Persisted notification-root correlation, allowed-recipient checks, context-only intake, explicit same-ticket retry and durable confirmation; known refused topics never become new candidates |
 | `src/app/memory.ts` | Private Hindsight connection, repository-scoped bounded recall, verified-summary export and durable retention receipts |
+| `src/app/optimization.ts` | Privacy-safe runtime observations, retention, reports/pagination and verified project-improvement lessons in the existing SQLite store |
 | `src/app/role-models.ts` | Resolves the Eval and Executor models, and seeds a new Session with its role's model |
 | `src/app/assessment.ts` | The MasterAssessor, the assessment schema and the window `orchestrator_eval` answers |
 | `src/app/execution-environment.ts` | The execution environment: its variables, a Ticket's values, the directory root and the lines of the prompt section, which `src/app/prompts.ts` fills into its template |
@@ -457,6 +464,7 @@ Generic modules have the following deliberate Source-specific boundaries:
 | `tests/delivery.spec.ts` | `AgentDelivery` |
 | `tests/retry-health.spec.ts`, `tests/role-models.spec.ts` | Model budget retries, and the models of the two roles |
 | `tests/memory.spec.ts` | Runtime memory isolation, credential/log exclusion, unavailable/redirecting backends, proof-gated export, private configuration and persisted retry/deduplication |
+| `tests/optimization.spec.ts` | Failure/recovery evidence, explicit vs automatic retries, recorder failure isolation, rollback/restart/retention, pagination, lesson admission and same-millisecond report transitions |
 | `tests/runtime.spec.ts` | The whole application on a simulated DeepSeek Harness host, through tools and HTTP |
 | `tests/tools.spec.ts` | The Sessions' tools: what `orchestrator_read` reads for each role, and the shapes and checks of the other main Session tools |
 | `tests/runtime-concurrency.spec.ts` | Work that overlaps: Triggers during a pass, Tickets that change during deliveries and launches |

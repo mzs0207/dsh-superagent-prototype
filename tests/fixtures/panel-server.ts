@@ -291,6 +291,11 @@ const ticketOf = (id: string) =>
 const SourceSave = z.object({ enabled: z.boolean(), config: z.unknown() })
 
 const ROUTES: { [K in keyof Api]: Route<K> } = {
+  // Optimization behavior uses the real SQLite/runtime fixture, not this UI-only server.
+  'GET optimization': { query: ['since', 'until', 'offset', 'limit'], answer: () => refuse(404, 'No optimization runtime') },
+  'GET optimization/records': { query: ['since', 'until', 'offset', 'limit'], answer: () => refuse(404, 'No optimization runtime') },
+  'GET optimization/lessons': { query: ['since', 'until', 'offset', 'limit'], answer: () => refuse(404, 'No optimization runtime') },
+  'POST optimization/lessons': { body: true, answer: () => refuse(404, 'No optimization runtime') },
   // The desktop panel fixture has no DSH session runtime; mobile API tests use fixtures/host.ts.
   'GET conversations': { query: ['offset'], answer: () => refuse(404, 'No conversation runtime') },
   'POST conversations': { body: true, answer: () => refuse(404, 'No conversation runtime') },

@@ -127,6 +127,7 @@ export class Assignments extends EnginePart {
     if (report.answers) this.takeUp(ticketId, report.answers)
     if (report.state === 'blocked' || report.state === 'failed') ticket.undelivered = ticket.undelivered.filter(id => !automatic(ticket.inputs.find(input => input.id === id)))
     this.repo.tickets.save(ticket)
+    this.emit('assignment.reported', { ticketId, assignmentId: assignment.id, state: report.state })
     // A ticket that follows Threads ends with them: a ready report ends it only once followsDone holds, with that outcome.
     const ready = !ticket.follows?.length ? 'completed' : this.tickets.followsDone(ticket)?.outcome
     // A dropped report after a close the ticket deferred ends it as the close did, which its final notice tells.

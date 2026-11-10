@@ -8,6 +8,7 @@ import type { HealthEntry } from '../infra/health.ts'
 import { KV } from '../kv.ts'
 import type { Effects } from './effects.ts'
 import type { Store } from './store.ts'
+import { OPTIMIZATION_TAG, OptimizationLessonInput, privateText, type OptimizationLesson } from './optimization.ts'
 
 const Config = z.object({
   apiUrl: z.url().refine(value => { const u = new URL(value); return !u.username && !u.password && !u.search && !u.hash
@@ -17,12 +18,12 @@ const Config = z.object({
   projectTag: z.string().regex(/^project:[^\s]+$/).max(200), repository: z.url(),
 }).strict()
 type Connection = z.infer<typeof Config>
-export interface MemoryExport { scope: string; documentId: string; content: string; at: string; fingerprint: string }
+export interface MemoryExport { scope: string; documentId: string; content: string; at: string; fingerprint: string; purpose?: 'optimization' }
 interface MemoryHost {
   stateDir: string
   deployment(): Pick<Deployment, 'webUrl' | 'namespace'>
   store: Pick<Store, 'get' | 'set' | 'atomic' | 'triggers' | 'settings'>
-  effects: Pick<Effects, 'handle' | 'enqueue'>
+  effects: Pick<Effects, 'handle' | 'enqueue' | 'pending'>
   health: HealthEntry
   lifetime: AbortSignal
 }
@@ -110,14 +111,35 @@ export class HindsightMemory {
     if (this.host.store.get(KV.memory.retained(id)) === fingerprint) return
     this.host.effects.enqueue('memory-retain', id, { scope, documentId, content, at: ended.at, fingerprint })
   }
+  /** Only explicitly verified, sanitized project-improvement lessons leave the local ledger; never runtime observations. */
+  rememberOptimization(lesson: OptimizationLesson): void {
+    const config = this.connection()
+    if (!config || lesson.status !== 'verified') return
+    const { id: lessonId, at, ...input } = lesson
+    const checked = OptimizationLessonInput.safeParse(input)
+    if (!checked.success) return
+    const content = ['Verified dsh-superagent project optimization', `Problem: ${input.problem}`, `Change: ${input.change}`,
+      `Validation: ${input.validation}`, `Observed effect: ${input.effect}`, ...input.evidence.map(value => `Evidence: ${value}`),
+      'Historical evidence only; verify against the current version before reusing.'].join('\n')
+    if (privateText.test(content) || content.includes(config.apiToken)) {
+      this.status('error', 'Optimization memory skipped: remove credentials and private identifiers'); return
+    }
+    const scope = key(scoped(config), OPTIMIZATION_TAG, 'optimization'), documentId = `dsh-optimization-${lessonId}`
+    const id = key(scope, documentId), fingerprint = key(content)
+    if (this.host.store.get(KV.memory.retained(id)) === fingerprint || this.host.effects.pending('memory-retain', id)) return
+    this.host.effects.enqueue('memory-retain', id, { scope, documentId, content, at, fingerprint, purpose: 'optimization' })
+  }
   private async retain(payload: MemoryExport, id: string): Promise<void> {
     const config = this.connection()
-    if (!config || scoped(config) !== payload.scope) throw new Error('Memory export scope changed; restore the original connection to deliver this record')
+    const expected = config && (payload.purpose === 'optimization' ? key(scoped(config), OPTIMIZATION_TAG, 'optimization') : scoped(config))
+    if (!config || expected !== payload.scope) throw new Error('Memory export scope changed; restore the original connection to deliver this record')
     if (this.host.store.get(KV.memory.retained(id)) === payload.fingerprint) return
     const result = z.object({ success: z.literal(true), bank_id: z.literal(config.bankId), items_count: z.literal(1), async: z.literal(false) })
       .safeParse(await this.request(config, '/memories', { async: false, items: [{ content: payload.content,
-        document_id: payload.documentId, timestamp: payload.at, context: 'Verified software repair',
-        tags: [config.projectTag, 'source:dsh-superagent', `repository:${this.host.deployment().namespace}`] }] }, 60_000))
+        document_id: payload.documentId, timestamp: payload.at,
+        context: payload.purpose === 'optimization' ? 'Verified dsh-superagent optimization' : 'Verified software repair',
+        tags: payload.purpose === 'optimization' ? [OPTIMIZATION_TAG, 'purpose:project-optimization', 'source:dsh-superagent']
+          : [config.projectTag, 'source:dsh-superagent', `repository:${this.host.deployment().namespace}`] }] }, 60_000))
     if (!result.success) throw new Error('Hindsight did not confirm synchronous retention')
     this.host.store.atomic(() => { this.host.store.set(KV.memory.retained(id), payload.fingerprint) })
   }

@@ -9,6 +9,7 @@ import type { SourceStatusView } from './views/sources.ts'
 import type { DecisionListView, SearchView, ThreadDetailView, ThreadListView } from './views/threads.ts'
 import type { TicketListView } from './views/tickets.ts'
 import type { Conversations } from './conversations.ts'
+import type { LessonInput, OptimizationLesson, OptimizationPage, OptimizationQuery, OptimizationRecord, OptimizationReport } from './optimization.ts'
 
 export const TICKET_FILTERS = ['open', 'person', 'working', 'idle', 'ended'] as const
 export const THREAD_FILTERS = ['subscribed', 'evaluating', 'recent', 'all'] as const
@@ -19,6 +20,10 @@ interface Paged { offset?: number; limit?: number }
 type Delivery = 'injected' | 'pending'
 
 export interface Api {
+  'GET optimization': { query?: OptimizationQuery; response: OptimizationReport }
+  'GET optimization/records': { query?: OptimizationQuery; response: OptimizationPage<OptimizationRecord> }
+  'GET optimization/lessons': { query?: OptimizationQuery; response: OptimizationPage<OptimizationLesson> }
+  'POST optimization/lessons': { body: LessonInput; response: OptimizationLesson }
   'GET conversations': { query?: { offset?: number }; response: Awaited<ReturnType<Conversations['list']>> }
   'POST conversations': { body: { requestId: string }; response: Awaited<ReturnType<Conversations['create']>> }
   'GET conversations/:id/history': { query: { through: number; before: number }; response: Awaited<ReturnType<Conversations['history']>> }

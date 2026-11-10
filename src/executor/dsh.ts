@@ -18,6 +18,7 @@ import { WorktreeNameSchema } from '../app/assessment.ts'
 import { resultRelay } from '../app/notices.ts'
 import type { HealthEntry } from '../infra/health.ts'
 import type { HindsightMemory } from '../app/memory.ts'
+import type { OptimizationLedger } from '../app/optimization.ts'
 import { cancelled, collectJob, killJobs, runningJobs, stopBackground, stopSubagents, until, untilQuiet } from './background.ts'
 
 const now = (): string => new Date().toISOString()
@@ -73,6 +74,7 @@ export interface ExecutorHost {
   /** Session manager for worker sessions and for relaying worker reports to the main Session. */
   readonly sessions: Pick<Sessions, 'ensure' | 'prompt' | 'promptedId' | 'relay' | 'holds'>
   readonly memory: Pick<HindsightMemory, 'recall'>
+  readonly optimization?: Pick<OptimizationLedger, 'workerRetry' | 'workerFailure' | 'humanInput'>
   closing(): boolean
   /** Whether processing is paused, which holds launches and input deliveries. */
   paused(): boolean
@@ -415,6 +417,7 @@ export class DshExecutor implements Executor {
   private launchFailed(ticketId: string, assignmentId: string, error: unknown): void {
     const ticket = this.host.store.tickets.get(ticketId)
     if (!ticket || !liveTicket(ticket) || latestAssignment(ticket)?.id !== assignmentId) return
+    this.host.optimization?.workerFailure(ticketId, error instanceof PrepareFailed ? 'prepare' : 'launch', error)
     this.failed(ticketId, String(error))
   }
   /** Records a `failed` report on the ticket and relays the failure to the main Session in one transaction. */
@@ -494,7 +497,10 @@ export class DshExecutor implements Executor {
     // A person's message typed into a worker's Session, which the ticket does not record.
     this.disposers.push(ctx.on('agent/inbox/claimed', ({ agent, message }) => {
       const ticketId = ticketOfSession(agent.id)
-      if (ticketId !== undefined && message.source.kind === 'user') this.personal.set(ticketId, now())
+      if (ticketId !== undefined && message.source.kind === 'user') {
+        this.personal.set(ticketId, now())
+        this.host.optimization?.humanInput(ticketId, message.id)
+      }
     }))
     // The Inputs a message of dsh-superagent's carries, which its worker reads once the Session took the message into its
     // history: a step that claimed it may be cancelled or fail before, which drops it.
@@ -513,6 +519,7 @@ export class DshExecutor implements Executor {
       const assignment = ticket && runningAssignment(ticket)
       if (!ticket || !assignment || !liveTicket(ticket) || this.host.closing()) return
       if (this.retries(assignment.id, error)) { this.resumeAfter(ticket.id, assignment.id, error); return }
+      this.host.optimization?.workerFailure(ticket.id, 'execution', error)
       void this.background(Promise.resolve().then(() => { this.failed(ticket.id, String(error)) }))
     }))
   }
@@ -560,6 +567,7 @@ export class DshExecutor implements Executor {
   /** Schedules a worker turn retry with exponential backoff after a transient provider or network error. */
   private resumeAfter(ticketId: string, assignmentId: string, error: unknown): void {
     const tries = this.transient.get(assignmentId)!
+    this.host.optimization?.workerRetry(ticketId, assignmentId, error, `${assignmentId}:${now()}:${tries}`)
     const text = `Your last turn failed for a passing reason (${String(error).slice(0, 200)}). Continue the assignment where it stopped.`
     this.resuming.add(assignmentId)
     const go = () => {

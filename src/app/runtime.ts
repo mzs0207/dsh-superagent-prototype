@@ -48,6 +48,7 @@ import { mainTools, type MainToolsHost } from './tools/main.ts'
 import { executorTools, type ExecutorToolsHost } from './tools/executor.ts'
 import { receiveZentaoFollowup } from './zentao-followup.ts'
 import { HindsightMemory } from './memory.ts'
+import { OptimizationLedger } from './optimization.ts'
 
 // Source plugins interact with dsh-superagent exclusively through the `SourceHost` service interface.
 declare module '@deepseek-ai/cordis' { interface Context { orchestrator: SourceHost } }
@@ -69,6 +70,7 @@ export class Runtime extends Service implements SourceHost {
   readonly settings: Settings
   readonly executor: DshExecutor
   readonly memory: HindsightMemory
+  readonly optimization: OptimizationLedger
   readonly assessor: MasterAssessor
   readonly outbox: Outbox
   readonly engine: Engine
@@ -108,9 +110,10 @@ export class Runtime extends Service implements SourceHost {
       store.set(KV.runtime.masterId, masterId)
       const commands = this.commands = new Commands(() => setup.deployment, setup.commandEnvironment, this.lifetime)
       const board = this.board
-      const effects = this.effects = new Effects(store, board)
+      const effects = this.effects = new Effects(store, board, undefined, attempt => this.optimization.effect(attempt))
       const memory = this.memory = new HindsightMemory({ store, effects, health: board.claim('memory'), stateDir: machine.stateDir,
         deployment: () => setup.deployment, lifetime: this.lifetime })
+      const optimization = this.optimization = new OptimizationLedger(store, board.claim('optimization'), lesson => memory.rememberOptimization(lesson))
       const sources = this.sources = new SourceRegistry(() => store.settings(), board, kind => {
         // Sync source member lists once startup completes when a source plugin loads dynamically.
         if (kind.policy?.sync) void this.ready?.then(() => this.settings.syncable().includes(kind.kind) ? this.settings.sync(kind.kind) : undefined)
@@ -131,7 +134,7 @@ export class Runtime extends Service implements SourceHost {
       this.settings = new Settings({ store, sources, engine: { policyChanged }, health: board, context: ctx, lifetime: this.lifetime, sessions,
         sourceHost: this, setup, requestPass: () => { this.passes.request() } })
       this.executor = new DshExecutor({ context: ctx, get engine() { return runtime.engine }, store, effects, health: board.claim('worker'), machine,
-        lifetime: this.lifetime, sessions, memory, closing: () => this.closing(), paused: () => this.paused(), environment, sourceLink: link,
+        lifetime: this.lifetime, sessions, memory, optimization, closing: () => this.closing(), paused: () => this.paused(), environment, sourceLink: link,
         repliedTo: trigger => repliedTo({ store, sources }, trigger) })
       this.assessor = new MasterAssessor({ get engine() { return runtime.engine }, commands, get deployment() { return setup.deployment }, effects,
         settings: () => store.settings(), paused: () => this.paused(), threadContext: trigger => sources.threadContext(trigger),
@@ -141,6 +144,7 @@ export class Runtime extends Service implements SourceHost {
       const policy = () => settingsPolicy(store.settings(), sources)
       const engine = this.engine = new Engine({ repo: store, scope: sources, policy, assessor, executor,
         outbox, prepareTicket: (ticket, outcome) => executor.prepare(ticket, outcome), emit: event => {
+          optimization.domain(event)
           // Notify the main Session only about domain events it did not initiate itself.
           const notice = this.quiet ? undefined : eventNotice(event, id => store.tickets.get(id))
           if (notice) sessions.notify(...notice)
@@ -215,6 +219,7 @@ export class Runtime extends Service implements SourceHost {
       return
     }
     await this.memory.load()
+    this.optimization.exportVerified()
     this.sessions.install()
     this.executor.install()
     await this.sessions.ensure(this.masterId, this.machine.stateDir, 'dsh-superagent orchestrator', 'orchestrator')
@@ -228,8 +233,8 @@ export class Runtime extends Service implements SourceHost {
   }
   private httpHost(): HttpHost {
     const runtime = this
-    const { store, sources, prompts, sessions, settings, engine, executor, health, machine, masterId, ready, sourceLinks, setup, passes } = this
-    return { store, sources, prompts, sessions, settings, engine, executor, health, machine, masterId, ready, sourceLinks,
+    const { store, sources, prompts, sessions, settings, engine, executor, optimization, health, machine, masterId, ready, sourceLinks, setup, passes } = this
+    return { store, sources, prompts, sessions, settings, engine, executor, optimization, health, machine, masterId, ready, sourceLinks,
       get deployment() { return setup.deployment },
       get setupProblem() { return setup.problem }, get feishuProblem() { return setup.feishuProblem },
       configured: () => setup.configured(), links: () => runtime.links(), ticketEnvironment: ticket => runtime.ticketEnvironment(ticket),

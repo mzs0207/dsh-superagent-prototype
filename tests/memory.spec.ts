@@ -8,6 +8,7 @@ import { HindsightMemory } from '../src/app/memory.ts'
 import { Store } from '../src/app/store.ts'
 import { Effects } from '../src/app/effects.ts'
 import { HealthBoard } from '../src/infra/health.ts'
+import { OPTIMIZATION_TAG, OptimizationLedger } from '../src/app/optimization.ts'
 
 let h: Host, server: Server
 let mode: 'ok' | 'unavailable' | 'redirect' | 'retain-failure'
@@ -125,5 +126,46 @@ it('replays a persisted failed export after reopening SQLite and then suppresses
     expect(effects.pending('memory-retain')).toBe(false)
     memory.remember(store.tickets.get(id)!); await effects.idle()
     expect(requests.filter(request => request.path.endsWith('/memories'))).toHaveLength(2)
+  } finally { await effects.drain(); store.close() }
+})
+
+it('exports only explicitly verified optimization lessons under an isolated project and purpose', async () => {
+  const lesson = { status: 'hypothesis', problem: 'Retry evidence vanished after success', change: 'Persist structured outcomes',
+    validation: '', effect: '', evidence: [] }
+  expect(await h.api('POST', 'optimization/lessons', lesson)).toMatchObject({ status: 200 })
+  await h.runtime.idle()
+  expect(requests.filter(request => request.path.endsWith('/memories'))).toEqual([])
+  const verified = { ...lesson, status: 'verified', validation: 'Local HTTP recovery and SQLite restart passed',
+    effect: 'The failed attempt remains visible after recovery', evidence: ['fixture: timeout then success; one failure and one success after reopen'] }
+  expect(await h.api('POST', 'optimization/lessons', verified)).toMatchObject({ status: 200 })
+  await h.runtime.idle()
+  const retained = requests.filter(request => request.path.endsWith('/memories'))
+  expect(retained).toHaveLength(1)
+  expect(retained[0]!.body).toMatchObject({ items: [{ tags: [OPTIMIZATION_TAG, 'purpose:project-optimization', 'source:dsh-superagent'] }] })
+  expect(JSON.stringify(retained[0]!.body)).not.toMatch(/project:widgets|acme\/widgets|fixture-memory-credential|orchestrator-host-/)
+  await h.api('POST', 'optimization/lessons', verified); await h.runtime.idle()
+  expect(requests.filter(request => request.path.endsWith('/memories'))).toHaveLength(1)
+})
+
+it('replays a failed optimization export after restart without losing the local lesson', async () => {
+  mode = 'retain-failure'
+  const lesson = { status: 'verified', problem: 'Failure evidence disappears', change: 'Store the observation',
+    validation: 'Focused recovery test passed', effect: 'Evidence survives queue cleanup', evidence: ['local recovery test: passed'] }
+  expect(await h.api('POST', 'optimization/lessons', lesson)).toMatchObject({ status: 200 })
+  await h.runtime.idle()
+  const deployment = h.runtime.deployment
+  await h.runtime.stop()
+  const store = new Store(join(h.directory, 'orchestrator.sqlite')), board = new HealthBoard()
+  const effects = new Effects(store, board, () => Date.now() + 60_000)
+  const memory = new HindsightMemory({ store, effects, health: board.claim('memory'), stateDir: h.directory,
+    deployment: () => deployment, lifetime: new AbortController().signal })
+  const ledger = new OptimizationLedger(store, board.claim('optimization'), record => memory.rememberOptimization(record))
+  try {
+    mode = 'ok'; await memory.load(); ledger.exportVerified(); effects.start(); await effects.idle()
+    expect(ledger.lessons().items).toEqual([expect.objectContaining(lesson)])
+    const retained = requests.filter(request => request.path.endsWith('/memories'))
+    expect(retained).toHaveLength(2)
+    expect(retained[1]!.body).toEqual(retained[0]!.body)
+    expect(effects.pending('memory-retain')).toBe(false)
   } finally { await effects.drain(); store.close() }
 })

@@ -19,6 +19,7 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -212,9 +213,35 @@ def start(args):
     raise RuntimeError('Startup health check timed out; inspect the log. Any running process was left intact.')
 
 
+def optimization(args):
+    """Read local evidence or submit an explicitly authored lesson; never restart the service."""
+    parsed = urllib.parse.urlsplit(args.url)
+    if parsed.scheme != 'http' or parsed.hostname not in ('127.0.0.1', 'localhost', '::1') or parsed.username or parsed.password:
+        raise RuntimeError('Optimization records require the local loopback HTTP management URL.')
+    parameters = {name: value for name, value in (('since', args.since), ('until', args.until),
+                  ('offset', args.offset), ('limit', args.limit)) if value is not None}
+    path = 'optimization' + ('' if args.view == 'summary' else '/' + args.view)
+    data = None
+    if args.lesson_file:
+        data = json.dumps(json.loads(Path(args.lesson_file).read_text()), ensure_ascii=False).encode()
+        path = 'optimization/lessons'
+    request = urllib.request.Request(args.url.rstrip('/') + '/orchestrator/api/' + path + '?' + urllib.parse.urlencode(parameters),
+                                     data=data, headers={'x-orchestrator-request': '1', 'content-type': 'application/json'})
+    # A management response must not redirect records or a submitted lesson to a different endpoint.
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            return None
+    try:
+        with urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect).open(request, timeout=args.timeout) as response:
+            print(json.dumps(json.load(response), ensure_ascii=False, indent=2))
+    except urllib.error.HTTPError as error:
+        raise RuntimeError(f'Optimization API rejected the request (HTTP {error.code}): {error.read(4096).decode(errors="replace")}') from None
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=['start', 'stop', 'restart', 'status'])
+    parser.add_argument('action', choices=['start', 'stop', 'restart', 'status', 'optimization'])
     parser.add_argument('--profile', default=os.environ.get('DSH_SUPERAGENT_PROFILE') or 'superagent',
                         help='DSH profile that loads dsh-superagent; its tmux session is dsh-<profile>.')
     parser.add_argument('--url', default=os.environ.get('DSH_SUPERAGENT_URL') or 'http://127.0.0.1:3082',
@@ -224,12 +251,20 @@ def main():
                         help='Graceful shutdown timeout in seconds; running Executor Sessions finish their step first.')
     parser.add_argument('--respect-stop', action='store_true',
                         help='For monitoring: never start/restart after an intentional stop.')
+    parser.add_argument('--view', choices=['summary', 'records', 'lessons'], default='summary', help='Optimization query (JSON output).')
+    parser.add_argument('--since', help='Inclusive ISO-8601 timestamp with timezone.')
+    parser.add_argument('--until', help='Inclusive ISO-8601 timestamp with timezone.')
+    parser.add_argument('--offset', type=int, default=0, help='Optimization pagination offset.')
+    parser.add_argument('--limit', type=int, default=50, help='Optimization page size (1–100).')
+    parser.add_argument('--lesson-file', help='Submit a reviewed, sanitized lesson from a JSON file.')
     args = parser.parse_args()
     if args.timeout <= 0 or args.stop_timeout <= 0:
         parser.error('--timeout and --stop-timeout must be positive')
     if not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.-]*', args.profile):
         parser.error('--profile must be a DSH profile name')
     os.umask(0o077)
+    if args.action == 'optimization':
+        return optimization(args)
     with (control(args.profile) / 'operation.lock').open('a') as lock:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -251,6 +286,6 @@ def main():
 if __name__ == '__main__':
     try:
         sys.exit(main())
-    except (OSError, RuntimeError, subprocess.CalledProcessError) as error:
+    except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError) as error:
         print(str(error), file=sys.stderr)
         sys.exit(1)

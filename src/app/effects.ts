@@ -8,6 +8,8 @@ export const FAILURES_BEFORE_ERROR = 3
 import type { HealthBoard, HealthEntry } from '../infra/health.ts'
 import type { Store } from './store.ts'
 import type { MemoryExport } from './memory.ts'
+import type { EffectAttempt } from './optimization.ts'
+import { key } from '../core/ids.ts'
 
 export interface EffectPayloads {
   /** Build an Eval's candidate card and relay it to the main Session; the key is the Eval ID. */
@@ -39,7 +41,7 @@ interface Handler<K extends EffectKind> {
 }
 type Options<K extends EffectKind> = Partial<Pick<Handler<K>, 'limit' | 'retry' | 'ordered' | 'quiet'>>
 /** `seq` preserves the row's queue position; `generation` increments on payload updates so a running attempt does not delete a newer payload. */
-interface Row { key: string; value: string; seq: number; generation: number; attempts: number; due: number }
+interface Row { key: string; value: string; seq: number; generation: number; attempts: number; due: number; since: string }
 type Task = { kind: EffectKind; key: string; done: Promise<void> }
 
 /**
@@ -57,7 +59,8 @@ export class Effects {
   /** Effects run only between `start` and `drain`; rows queued before `start` wait, such as while setup is incomplete. */
   private started = false
   private stopped = false
-  constructor(private readonly store: Store, private readonly board: Pick<HealthBoard, 'claim'>, private readonly now = () => Date.now()) {
+  constructor(private readonly store: Store, private readonly board: Pick<HealthBoard, 'claim'>, private readonly now = () => Date.now(),
+    private readonly observe?: (attempt: EffectAttempt) => void) {
     this.seq = Number(store.db.prepare('SELECT IFNULL(MAX(seq), 0) AS seq FROM effect').get()?.seq ?? 0)
   }
   /** Upserts an effect in the caller's transaction, coalescing with any waiting row of the same kind and key while keeping its queue position. */
@@ -110,8 +113,8 @@ export class Effects {
         const running = new Set([...this.tasks].filter(task => task.kind === kind).map(task => task.key))
         // Ordered kinds block behind their oldest row even when it is not yet due; limit() is queried only after ready rows exist.
         const rows = (handler.ordered
-          ? this.store.db.prepare('SELECT key, value, seq, generation, attempts, due FROM effect WHERE kind = ? ORDER BY seq LIMIT 1').all(kind)
-          : this.store.db.prepare('SELECT key, value, seq, generation, attempts, due FROM effect WHERE kind = ? AND due <= ? ORDER BY seq LIMIT ?')
+          ? this.store.db.prepare('SELECT key, value, seq, generation, attempts, due, since FROM effect WHERE kind = ? ORDER BY seq LIMIT 1').all(kind)
+          : this.store.db.prepare('SELECT key, value, seq, generation, attempts, due, since FROM effect WHERE kind = ? AND due <= ? ORDER BY seq LIMIT ?')
             .all(kind, this.now(), 16 + running.size)) as unknown as Row[]
         const ready = handler.ordered && running.size ? [] : rows.filter(row => row.due <= this.now() && !running.has(row.key))
         let room = ready.length ? handler.limit() - running.size : 0
@@ -131,8 +134,10 @@ export class Effects {
     this.tasks.add(task)
   }
   private async attempt(kind: EffectKind, handler: Handler<never>, row: Row): Promise<void> {
+    const started = this.now()
     let failure: { error: unknown } | undefined
-    try { await handler.run(JSON.parse(row.value) as never, row.key) } catch (error) { failure = { error } }
+    let payload: EffectPayloads[EffectKind] | undefined
+    try { payload = JSON.parse(row.value) as EffectPayloads[EffectKind]; await handler.run(payload as never, row.key) } catch (error) { failure = { error } }
     // Match seq and generation so a row replaced or re-queued while running is not overwritten.
     const own = 'kind = ? AND key = ? AND seq = ? AND generation = ?', ownRow = [kind, row.key, row.seq, row.generation] as const
     if (!failure) this.store.db.prepare(`DELETE FROM effect WHERE ${own}`).run(...ownRow)
@@ -144,6 +149,12 @@ export class Effects {
       const delay = Math.min(handler.retry[1], handler.retry[0] * 2 ** Math.min(row.attempts, 16))
       this.store.db.prepare(`UPDATE effect SET attempts = attempts + 1, error = ?, due = ? WHERE ${own}`)
         .run(String(failure.error).slice(0, 1000), this.now() + delay, ...ownRow)
+    }
+    if (this.observe && !(failure?.error instanceof Later)) {
+      const ticketId = payload && 'ticketId' in payload ? payload.ticketId : kind === 'reply' ? this.store.receipts.get(row.key)?.ticketId : undefined
+      this.observe({ id: key('effect', kind, row.key, row.since, String(row.seq), String(row.generation), String(row.attempts)),
+        kind, ...(ticketId ? { ticketId } : {}), at: new Date(this.now()).toISOString(), durationMs: Math.max(0, this.now() - started),
+        status: failure ? 'failed' : 'succeeded', ...(failure ? { error: failure.error } : {}) })
     }
     if (!this.stopped) this.report(kind)
   }

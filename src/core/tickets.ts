@@ -242,6 +242,7 @@ export class Tickets extends EnginePart {
     const held = liveTicket(ticket) && (automatic(input) || (input.kind === 'trigger' && input.context) || ticket.resume === 'manual') && waitsForPerson(ticket)
     if (!held) ticket.undelivered.push(input.id)
     this.repo.tickets.save(ticket)
+    if (input.kind === 'trigger' && input.human && !input.context) this.emit('ticket.human-input', { ticketId: ticket.id, inputId: input.id })
     if (!liveTicket(ticket) || held) return
     const running = runningAssignment(ticket), latest = latestAssignment(ticket)
     if (running) this.options.executor.deliver(ticket, running)
