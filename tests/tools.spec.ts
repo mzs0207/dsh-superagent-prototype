@@ -345,11 +345,14 @@ it('reads a ticket with the ids it is tied to, its reports by assignment, and it
   expect(await read(`ticket/${ticket.id}/input/text:long`)).toMatchObject({ text: page.text })
   expect(await read(`ticket/${ticket.id}/inputs`, { offset: 20 })).toMatchObject({ items: expect.objectContaining({ length: 4 }), next_offset: null })
   expect(await read(details.assignments.items[0]!.report.read)).toMatchObject({ text: report(7).summary.slice(0, 4000) })
-  vi.mocked(h.controller.inspect).mockResolvedValueOnce({ events: [{ type: 'assistant/message', data: { message: { role: 'assistant',
-    content: [{ type: 'text', text: `I fixed the margin. ${'Details. '.repeat(20)}` }] } } }] } as never)
+  h.sessionQuery.inspectSession.mockImplementationOnce(async (_id, readEvents) => readEvents({ snapshotEvents: () => [{ type: 'assistant/message', data: { message: { role: 'assistant',
+    content: [{ type: 'text', text: `I fixed the margin. ${'Details. '.repeat(20)}` }] } } }] }))
+  h.controller.resolveAgent.mockClear()
   const transcript = JSON.parse((await read(`ticket/${ticket.id}/transcript`) as { text: string }).text) as { preview: string; read: string }
   expect(transcript).toMatchObject({ preview: expect.stringMatching(/^I fixed the margin\./), read: `ticket/${ticket.id}/message/0` })
   expect(transcript.preview.length).toBeLessThanOrEqual(80)
+  expect(h.sessionQuery.inspectSession).toHaveBeenCalledWith(sessionId, expect.any(Function), expect.any(AbortSignal))
+  expect(h.controller.resolveAgent).not.toHaveBeenCalled()
 })
 
 it('reads a trigger once with the message it replies to and the messages around it on its thread, without the CI runs', async () => {

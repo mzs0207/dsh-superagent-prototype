@@ -203,14 +203,14 @@ Exports use the existing durable effect queue and a stable document ID, with suc
 Run this block once, on a machine that has no `superagent` profile yet:
 
 ```sh
-npm install -g @deepseek-ai/dsh@0.2.1-rc.3
+npm install -g @deepseek-ai/dsh@0.2.2-rc.3
 git clone <this repository> dsh-superagent && cd dsh-superagent
 pnpm install && pnpm build
 dsh superagent --from-default-profile web --dump-config > /dev/null
 dsh plugin --profile superagent add "link:$PWD"
 ```
 
-The pinned version above is public; other versions must satisfy `engines.dsh` in `package.json`.
+Use the pinned CLI version above; it matches this bundle’s tested Harness SDK. Do not mix independently upgraded `@deepseek-ai/dsh-*` packages or install the CLI by dist-tag.
 
 The fourth command creates `~/.dsh/profiles/superagent` from the DeepSeek Harness Web template. The fifth installs this bundle. Set `DSH_HOME` to relocate the default `~/.dsh` directory.
 
@@ -419,9 +419,9 @@ From an allowed GitHub account, open an Issue or post a comment containing `@<ag
 ## Upgrade
 
 1. Wait until no Executor is in the middle of a turn.
-2. Back up `<stateDir>/orchestrator.sqlite`.
-3. Run `git pull && pnpm install && pnpm build`.
-4. Run `scripts/dsh-superagent restart` and inspect its status.
+2. Stop the service gracefully, then back up `<stateDir>` and the existing DSH home (including its profile and Session data). Keep the backups private.
+3. Update the bundle checkout, then run `pnpm install --frozen-lockfile && pnpm check`. Install the matching pinned CLI from the Install section before starting the updated bundle.
+4. Start the existing profile and inspect its status. Check the Deployment tab, open an existing conversation, and reconnect to its live stream in a test environment before rolling out. Do not recreate the profile or enable new Sources during the upgrade.
 
 A restart ends running Assignments and starts replacements with recovery notes. Team text and overridden prompt parts are retained; parts without overrides follow the new defaults. Review parts marked **Default updated** after upgrading.
 

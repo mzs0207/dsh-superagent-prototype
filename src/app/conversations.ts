@@ -81,7 +81,7 @@ export class Conversations {
   }
   async history(id: string, query: Record<string, string>) {
     const { through, before } = pageQuery.parse(query)
-    const page = await this.ctx.sessionController.page({ address: { kind: 'session', sessionId: sessionId(id) },
+    const page = await this.ctx.sessionController.events({ address: { kind: 'session', sessionId: sessionId(id) },
       throughSeq: through, beforeSeq: before, maxMessages: 50 }, AbortSignal.timeout(10_000))
     return history(page.records, page.hasMore)
   }

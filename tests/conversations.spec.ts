@@ -33,7 +33,7 @@ it('lists desktop conversations with roles without leaking paths or arbitrary pr
 
 it('keeps human transcript history, omitting replacement copies, credentials and reasoning', async () => {
   const event = (seq: number, type: string, data: unknown, surfaceOp: unknown = 'append') => ({ type: 'event', event: { seq, time: seq, type, data, surfaceOp } })
-  Object.assign(h.controller, { page: async () => ({ hasMore: true, records: [
+  Object.assign(h.controller, { events: async () => ({ hasMore: true, records: [
     event(1, 'request/start', { apiKey: 'private-token' }),
     event(2, 'user/message', { role: 'user', content: [{ type: 'text', text: '原问题' }], source: { kind: 'user', rpcId: 'request-1' } }),
     event(3, 'assistant/message', { message: { role: 'assistant', content: [{ type: 'reasoning', text: 'private-reasoning' }, { type: 'text', text: '原回复' }] } }),
@@ -60,7 +60,7 @@ it('rejects empty prompts, oversized text and injected create options before act
 })
 
 it('retains interrupted assistant text and distinguishes injected context from the human', async () => {
-  Object.assign(h.controller, { page: async () => ({ hasMore: false, records: [
+  Object.assign(h.controller, { events: async () => ({ hasMore: false, records: [
     { type: 'event', event: { seq: 1, time: 1, type: 'user/message', surfaceOp: 'append',
       data: { role: 'user', content: [{ type: 'text', text: 'Runtime context' }], source: { kind: 'runtime-context', form: 'snapshot' } } } },
     { type: 'event', event: { seq: 2, time: 2, type: 'assistant/attempt',
@@ -74,7 +74,7 @@ it('retains interrupted assistant text and distinguishes injected context from t
 })
 
 it('shows cancellation and provider failures after reopening history', async () => {
-  Object.assign(h.controller, { page: async () => ({ hasMore: false, records: [
+  Object.assign(h.controller, { events: async () => ({ hasMore: false, records: [
     { type: 'event', event: { seq: 1, time: 1, type: 'assistant/message', surfaceOp: 'append',
       data: { interrupted: true, message: { role: 'assistant', content: [{ type: 'text', text: '停止前的文字' }] } } } },
     { type: 'event', event: { seq: 2, time: 2, type: 'turn/end', data: { reason: { kind: 'error', error: { message: 'Provider unavailable' } } } } },
@@ -105,4 +105,18 @@ it('admits a retried message once across the claimed-before-history gap and conc
   expect((await concurrent).status).toBe(200)
   expect((await h.api('POST', `conversations/${id}/messages`, body)).status).toBe(200)
   expect(delivered).toEqual(['只执行一次'])
+})
+
+it('retries persistence after admitting the prompt without sending the same request twice', async () => {
+  const id = 'mobile-flush-retry'
+  await h.controller.create({ sessionId: id })
+  const prompt = vi.fn(async () => ({ accepted: true }))
+  Object.assign(h.controller, { prompt })
+  const flushes = h.persistence.flush.mock.calls.length
+  h.persistence.flush.mockRejectedValueOnce(new Error('temporary journal error'))
+  const body = { requestId: 'stable-after-admission', text: '已经受理' }
+  expect((await h.api('POST', `conversations/${id}/messages`, body)).status).toBe(500)
+  expect((await h.api('POST', `conversations/${id}/messages`, body)).status).toBe(200)
+  expect(prompt).toHaveBeenCalledOnce()
+  expect(h.persistence.flush).toHaveBeenCalledTimes(flushes + 2)
 })

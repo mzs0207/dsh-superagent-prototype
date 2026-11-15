@@ -62,6 +62,8 @@ On a network/upstream failure, already loaded content stays visible with an expl
 
 ### Conversations
 
+Keep the CLI on the same pinned Harness release as the bundle (see [Install](006-deployment.md#install)). On a first mobile trial, use a test profile or a test computer: open an ordinary conversation, send a message, background the reader during a reply, and reopen it. Check that the reply continues or is present in history, then restart Harness and open the same conversation. If the send was not confirmed, use **重试发送** rather than composing it again so the same request ID is reused.
+
 - **会话** lists 20 sessions per page from the selected computer; **新建会话** uses that computer's default DSH agent preset, workspace and model. Existing desktop conversations appear in the same list. Child subagent controls are not exposed.
 - Open a conversation to read its latest 50 messages and **加载更早消息** for older history. Context/task inputs and tool results are folded; user/assistant text and interrupted partial replies remain visible. Raw request headers, model reasoning and arbitrary projection fields are not forwarded. Content is text, not executable HTML.
 - Enter up to 32,000 characters and tap **发送**. Messages to a running agent are delivered at its next step through DSH's existing steering path. Task-worker messages use the same human-intervention handling as desktop input; they do not create a separate task or silently restore a withdrawn mandate.
