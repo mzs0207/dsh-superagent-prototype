@@ -1,6 +1,6 @@
 import { expect, it } from 'vitest'
 import { z } from 'zod'
-import { registerHttp } from '../src/app/http.ts'
+import { registerHttp, sameOrigin } from '../src/app/http.ts'
 import { PromptConflict } from '../src/app/prompts.ts'
 import { SettingsConflict } from '../src/app/settings.ts'
 import type { HttpHost } from '../src/app/http.ts'
@@ -78,6 +78,12 @@ it('answers only a same-origin request from the panel on the loopback address', 
   expect(await post({ host: 'localhost:3082', origin: 'http://localhost:3082' })).toMatchObject({ status: 200 })
   // Management routes require a loopback Web server.
   expect(() => serve({}, '0.0.0.0')).toThrow('Orchestrator management requires a loopback Web server')
+})
+
+it('refuses management requests before the Web server has a bound port', () => {
+  const request = (host: string) => ({ headers: { host, 'x-orchestrator-request': '1' } })
+  expect(sameOrigin(request('127.0.0.1:3082'), undefined)).toBe(false)
+  expect(sameOrigin(request('127.0.0.1:undefined'), undefined)).toBe(false)
 })
 
 it('answers a prompt save that lost a race with 409, and a settings body over 128 KiB with 400', async () => {
