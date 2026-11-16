@@ -81,6 +81,11 @@ export class Effects {
   pending(kind: EffectKind, key?: string): boolean {
     return key === undefined ? !!this.store.db.prepare('SELECT 1 FROM effect WHERE kind = ? LIMIT 1').get(kind) : !!this.store.db.prepare('SELECT 1 FROM effect WHERE kind = ? AND key = ?').get(kind, key)
   }
+  /** Current persisted payload, including a running generation that a newer enqueue may replace. */
+  payload<K extends EffectKind>(kind: K, key: string): EffectPayloads[K] | undefined {
+    const row = this.store.db.prepare('SELECT value FROM effect WHERE kind = ? AND key = ?').get(kind, key)
+    return row ? JSON.parse(String(row.value)) as EffectPayloads[K] : undefined
+  }
   /** Drops a queued row by kind and key; if it is already running, that attempt finishes normally. */
   cancel(kind: EffectKind, key: string): void {
     this.store.db.prepare('DELETE FROM effect WHERE kind = ? AND key = ?').run(kind, key)

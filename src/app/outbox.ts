@@ -52,9 +52,9 @@ export class Outbox implements OutboxPort {
     if (!sources.channelAllowed(receipt.channel)) { store.receipts.settle(receipt, 'channelIgnored'); return }
     // Choose at delivery time so already queued ZenTao notes also respect the operator's notification setting.
     const feishu = receipt.channel.source === 'zentao' ? sources.instance<FeishuConfig>('feishu') : undefined
-    // A notice for a topic needs the bot that receives the reply; without an app id no root can be matched again, so keep the comment.
-    const appId = commands.deployment.feishu?.appId
-    if (feishu?.enabled && feishu.config.notificationOpenId && appId) {
+    if (feishu?.enabled && feishu.config.notificationOpenId) {
+      const appId = commands.deployment.feishu?.appId
+      if (!appId) throw new Later('The Feishu bot application is unavailable; notification waits for credentials to recover')
       const { bugId, url } = receipt.channel.address
       // Notices carry the worker's full evidence to the fixed operator; they are not IM replies and keep their text.
       const text = `禅道 Bug #${bugId}\n${url}\n\n${receipt.text}`

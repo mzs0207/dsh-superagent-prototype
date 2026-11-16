@@ -201,29 +201,15 @@ export class OptimizationLedger {
         : { ...lesson, id, at: new Date(this.now()).toISOString() }
       this.store.db.prepare('INSERT INTO optimization_lesson VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET value = excluded.value')
         .run(id, record.at, JSON.stringify(record))
-      if (record.status === 'verified') {
-        // A lesson authored now is exported now, so a later boot does not queue it a second time.
-        this.store.set(KV.optimization.exported(id), record.at)
-        this.retain(record)
-      }
+      if (record.status === 'verified') this.retain(record)
       return record
     })
   }
-  /**
-   * Queue verified lessons the memory connection has not taken yet, once each: the marker is written before the enqueue, so a
-   * persistently rejecting endpoint is not enqueued again on every restart.
-   */
+  /** Revisit verified local lessons; the memory queue and successful content fingerprints suppress duplicate exports. */
   exportVerified(): void {
     this.observe(() => {
       const rows = this.store.db.prepare("SELECT value FROM optimization_lesson WHERE value ->> '$.status' = 'verified'").iterate()
-      this.store.atomic(() => {
-        for (const row of rows) {
-          const lesson = JSON.parse(String(row.value)) as OptimizationLesson
-          if (this.store.get(KV.optimization.exported(lesson.id))) continue
-          this.store.set(KV.optimization.exported(lesson.id), lesson.at)
-          this.retain(lesson)
-        }
-      })
+      for (const row of rows) this.retain(JSON.parse(String(row.value)) as OptimizationLesson)
     })
   }
 }

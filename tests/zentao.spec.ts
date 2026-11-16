@@ -265,6 +265,26 @@ describe('Zentao workflow boundaries', () => {
       expect(h.store.tickets.get(h.ticket.id)!.assignments.map(item => item.report?.state)).toEqual(['blocked'])
     } finally { await h.effects.drain(); sent.mockRestore(); h.store.close() }
   })
+  it('holds Feishu notices without a bot application and delivers them after credentials recover, never as comments', async () => {
+    const deployment = testDeployment(), bot = deployment.feishu
+    delete deployment.feishu
+    const h = await worker(deployment)
+    const sent = vi.spyOn(h.ctx.commands, 'lark').mockResolvedValue({ message_id: 'om_recovered' })
+    try {
+      notifications(h)
+      const id = guardZentaoReport(h.host, h.ticket, { state: 'blocked', summary: '等待飞书配置恢复。' })!
+      h.effects.start(); await h.outbox.sent()
+      expect(h.store.replyStatus(id)).toBe('pending')
+      expect(comments).toEqual([])
+      expect(sent).not.toHaveBeenCalled()
+      deployment.feishu = bot
+      h.advance(5000); await h.outbox.sent()
+      expect(h.store.replyStatus(id)).toBe('sent')
+      expect(sent).toHaveBeenCalledExactlyOnceWith(['im', '+messages-send', '--user-id', 'ou_operator',
+        '--text', expect.stringContaining('等待飞书配置恢复。'), '--idempotency-key', id])
+      expect(comments).toEqual([])
+    } finally { await h.effects.drain(); sent.mockRestore(); h.store.close() }
+  })
   it('routes an already queued human-action reply through Feishu when notifications are enabled before delivery', async () => {
     const h = await worker()
     const sent = vi.spyOn(h.ctx.commands, 'lark').mockResolvedValue({ message_id: 'om_first' })

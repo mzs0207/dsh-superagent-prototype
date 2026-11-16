@@ -212,6 +212,8 @@ Before first inbound replies, the Feishu recovery loop enrols persisted notifica
 
 Bounded loopback queries and `scripts/dsh-superagent optimization` expose evidence/reports and explicit lesson submission, not a new service or mobile write path. Verified lessons require validation/effect/evidence and share `memory-retain`, with a distinct scope discriminator and `project:dsh-superagent-prototype:optimization` / `purpose:project-optimization` tags, never the business repository tags. Existing KV receipts deduplicate successful exports; startup revisits verified local lessons. Hypotheses and raw runtime observations never leave the ledger. No automatic diagnosis or self-modification occurs.
 
+Export eligibility comes from the current local lesson, not a pre-send marker. The memory transport compares content fingerprints with both the persisted queue payload and successful retention receipts. Differing edits replace the existing effect payload; its generation guard prevents an older in-flight attempt from deleting the newer version. Identical queued content is left untouched so restarts preserve its retry backoff.
+
 
 ### DshExecutor
 

@@ -22,8 +22,8 @@ export interface MemoryExport { scope: string; documentId: string; content: stri
 interface MemoryHost {
   stateDir: string
   deployment(): Pick<Deployment, 'webUrl' | 'namespace'>
-  store: Pick<Store, 'get' | 'set' | 'atomic' | 'triggers' | 'settings'>
-  effects: Pick<Effects, 'handle' | 'enqueue' | 'pending'>
+  store: Pick<Store, 'db' | 'get' | 'set' | 'atomic' | 'triggers' | 'settings'>
+  effects: Pick<Effects, 'handle' | 'enqueue' | 'payload'>
   health: HealthEntry
   lifetime: AbortSignal
 }
@@ -125,10 +125,18 @@ export class HindsightMemory {
     }
     const scope = key(scoped(config), OPTIMIZATION_TAG, 'optimization'), documentId = `dsh-optimization-${lessonId}`
     const id = key(scope, documentId), fingerprint = key(content)
-    if (this.host.store.get(KV.memory.retained(id)) === fingerprint || this.host.effects.pending('memory-retain', id)) return
+    const pending = this.host.effects.payload('memory-retain', id)
+    // A newer local edit must replace an older queued/running generation, even when restoring already retained content.
+    if (pending ? pending.fingerprint === fingerprint : this.host.store.get(KV.memory.retained(id)) === fingerprint) return
     this.host.effects.enqueue('memory-retain', id, { scope, documentId, content, at, fingerprint, purpose: 'optimization' })
   }
   private async retain(payload: MemoryExport, id: string): Promise<void> {
+    if (payload.purpose === 'optimization') {
+      const lesson = this.host.store.db.prepare('SELECT value FROM optimization_lesson WHERE id = ?')
+        .get(payload.documentId.slice('dsh-optimization-'.length))
+      // A queued snapshot does not authorize a later export after the local verification was withdrawn.
+      if (!lesson || JSON.parse(String(lesson.value)).status !== 'verified') return
+    }
     const config = this.connection()
     const expected = config && (payload.purpose === 'optimization' ? key(scoped(config), OPTIMIZATION_TAG, 'optimization') : scoped(config))
     if (!config || expected !== payload.scope) throw new Error('Memory export scope changed; restore the original connection to deliver this record')

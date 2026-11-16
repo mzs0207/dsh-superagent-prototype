@@ -1,6 +1,6 @@
 import { createServer, type Server } from 'node:http'
 import { dirname, join } from 'node:path'
-import { chmodSync, readFileSync, writeFileSync } from 'node:fs'
+import { chmodSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { afterEach, beforeEach, expect, it } from 'vitest'
 import { startRuntime, feishu, type Host } from './fixtures/host.ts'
 import { KV } from '../src/kv.ts'
@@ -171,6 +171,8 @@ it('replays a failed optimization export after restart without losing the local 
     validation: 'Focused recovery test passed', effect: 'Evidence survives queue cleanup', evidence: ['local recovery test: passed'] }
   expect(await h.api('POST', 'optimization/lessons', lesson)).toMatchObject({ status: 200 })
   await h.runtime.idle()
+  h.runtime.optimization.exportVerified(); await h.runtime.idle()
+  expect(requests.filter(request => request.path.endsWith('/memories'))).toHaveLength(1)
   const deployment = h.runtime.deployment
   await h.runtime.stop()
   const store = new Store(join(h.directory, 'orchestrator.sqlite')), board = new HealthBoard()
@@ -186,4 +188,81 @@ it('replays a failed optimization export after restart without losing the local 
     expect(retained[1]!.body).toEqual(retained[0]!.body)
     expect(effects.pending('memory-retain')).toBe(false)
   } finally { await effects.drain(); store.close() }
+})
+
+it.each(['missing', 'invalid'] as const)('exports locally verified lessons after a %s memory configuration recovers on restart', async boundary => {
+  const file = join(h.directory, 'hindsight.json'), configured = readFileSync(file, 'utf8')
+  if (boundary === 'missing') unlinkSync(file)
+  else writeFileSync(file, '{invalid')
+  await h.runtime.memory.load()
+  const lesson = { id: 'a'.repeat(8), status: 'verified', problem: 'Memory was not configured', change: 'Preserve local evidence',
+    validation: 'Local recovery verified', effect: 'Evidence can be exported later', evidence: ['isolated configuration recovery'] }
+  expect(await h.api('POST', 'optimization/lessons', lesson)).toMatchObject({ status: 200 })
+  await h.runtime.idle()
+  expect(requests.filter(request => request.path.endsWith('/memories'))).toEqual([])
+  const deployment = h.runtime.deployment
+  await h.runtime.stop()
+  writeFileSync(file, configured, { mode: 0o600 })
+  const store = new Store(join(h.directory, 'orchestrator.sqlite')), board = new HealthBoard()
+  const effects = new Effects(store, board)
+  const memory = new HindsightMemory({ store, effects, health: board.claim('memory'), stateDir: h.directory,
+    deployment: () => deployment, lifetime: new AbortController().signal })
+  const ledger = new OptimizationLedger(store, board.claim('optimization'), record => memory.rememberOptimization(record))
+  try {
+    await memory.load(); ledger.exportVerified(); effects.start(); await effects.idle()
+    const retained = requests.filter(request => request.path.endsWith('/memories'))
+    expect(retained).toHaveLength(1)
+    expect(retained[0]!.body.items![0]!).toMatchObject({ document_id: `dsh-optimization-${lesson.id}`,
+      content: expect.stringContaining(lesson.change) })
+    ledger.exportVerified(); await effects.idle()
+    expect(requests.filter(request => request.path.endsWith('/memories'))).toHaveLength(1)
+  } finally { await effects.drain(); store.close() }
+})
+
+it('exports the latest edit of a verified lesson queued while processing is paused', async () => {
+  const settings = h.runtime.store.settings()
+  h.runtime.store.saveSettings({ ...settings, paused: true })
+  const lesson = { id: 'b'.repeat(8), status: 'verified', problem: 'Evidence needs revision', change: 'Original verified change',
+    validation: 'Local edit verified', effect: 'The current evidence is retained', evidence: ['isolated queue recovery'] }
+  expect(await h.api('POST', 'optimization/lessons', lesson)).toMatchObject({ status: 200 })
+  const edited = { ...lesson, change: 'Updated verified change' }
+  expect(await h.api('POST', 'optimization/lessons', edited)).toMatchObject({ status: 200, body: { change: edited.change } })
+  expect(requests.filter(request => request.path.endsWith('/memories'))).toEqual([])
+  h.runtime.store.saveSettings(settings); await h.runtime.idle()
+  const retained = requests.filter(request => request.path.endsWith('/memories'))
+  expect(retained).toHaveLength(1)
+  expect(retained[0]!.body.items![0]!.content).toContain(edited.change)
+  expect(retained[0]!.body.items![0]!.content).not.toContain(lesson.change)
+})
+
+it('does not export a stale queued edit when a lesson is restored to its already retained content', async () => {
+  const lesson = { id: 'c'.repeat(8), status: 'verified', problem: 'Evidence needs revision', change: 'Verified original content',
+    validation: 'Local edit verified', effect: 'The current evidence is retained', evidence: ['isolated queue recovery'] }
+  expect(await h.api('POST', 'optimization/lessons', lesson)).toMatchObject({ status: 200 })
+  await h.runtime.idle()
+  const settings = h.runtime.store.settings()
+  h.runtime.store.saveSettings({ ...settings, paused: true })
+  expect(await h.api('POST', 'optimization/lessons', { ...lesson, change: 'Discarded queued edit' })).toMatchObject({ status: 200 })
+  expect(await h.api('POST', 'optimization/lessons', lesson)).toMatchObject({ status: 200 })
+  h.runtime.store.saveSettings(settings); await h.runtime.idle()
+  const retained = requests.filter(request => request.path.endsWith('/memories'))
+  expect(retained).toHaveLength(1)
+  expect(retained[0]!.body.items![0]!.content).toContain(lesson.change)
+  expect(h.runtime.effects.pending('memory-retain')).toBe(false)
+})
+
+it.each(['ready', 'missing'] as const)('does not export a withdrawn verification after the memory connection is %s', async connection => {
+  const settings = h.runtime.store.settings()
+  h.runtime.store.saveSettings({ ...settings, paused: true })
+  const lesson = { id: 'd'.repeat(8), status: 'verified', problem: 'Evidence needs rechecking', change: 'Previously verified change',
+    validation: 'Earlier check passed', effect: 'Earlier observed effect', evidence: ['earlier local verification'] }
+  expect(await h.api('POST', 'optimization/lessons', lesson)).toMatchObject({ status: 200 })
+  const file = join(h.directory, 'hindsight.json'), configured = readFileSync(file, 'utf8')
+  if (connection === 'missing') { unlinkSync(file); await h.runtime.memory.load() }
+  expect(await h.api('POST', 'optimization/lessons', { ...lesson, status: 'hypothesis', change: 'Unverified replacement',
+    validation: '', effect: '', evidence: [] })).toMatchObject({ status: 200, body: { status: 'hypothesis' } })
+  if (connection === 'missing') { writeFileSync(file, configured, { mode: 0o600 }); await h.runtime.memory.load() }
+  h.runtime.store.saveSettings(settings); await h.runtime.idle()
+  expect(requests.filter(request => request.path.endsWith('/memories'))).toEqual([])
+  expect(h.runtime.effects.pending('memory-retain')).toBe(false)
 })

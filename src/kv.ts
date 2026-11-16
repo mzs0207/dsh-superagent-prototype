@@ -37,7 +37,7 @@ export const KV = {
   /** Fingerprint of each successfully retained document, scoped to its Hindsight connection and repository. */
   memory: { retained: family<string>('memory-retained:') },
   /** First activation of the local optimization collector; not a claim of historical coverage. */
-  optimization: { startedAt: record<string>('optimization-started-at'), exported: family<string>('optimization-exported:') },
+  optimization: { startedAt: record<string>('optimization-started-at') },
   /** Schema 11 migration: legacy main-Session queues imported into the effect table. */
   queues: { relays: record<{ id: string; text: string }[]>('relay-queue'), unsubscribed: record<string[]>('subscription-results'),
     prompts: record<number | null>('prompt-notification'), settings: record<number | null>('settings-notification') },
