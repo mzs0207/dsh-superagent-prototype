@@ -28,7 +28,6 @@ interface MemoryHost {
   lifetime: AbortSignal
 }
 const scoped = (config: Connection) => key(config.apiUrl, config.bankId, config.projectTag, config.repository)
-const credentials = /(?:\b(?:api[-_ ]?key|access[-_ ]?token|refresh[-_ ]?token|password|passwd|secret|authorization|cookie)\s*[:=]|\bBearer\s+\S+|-----BEGIN .*PRIVATE KEY-----|\b(?:sk-|ghp_|glpat-)[A-Za-z0-9_-]{12,}|\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.)/i
 const Recall = z.object({ results: z.array(z.object({ id: z.string(), text: z.string(), tags: z.array(z.string()).nullish() })) })
 
 /** Bounded, nonblocking recall and durable idempotent export, sharing the existing Effects queue rather than a second database. */
@@ -67,8 +66,8 @@ export class HindsightMemory {
     if (!config) return
     // Never send original bug bodies, conversations or tool output to the memory service.
     const query = `${ticket.title}\n${ticket.mandate.scope}`.slice(0, 1000)
-    if (credentials.test(query) || query.includes(config.apiToken)) {
-      this.status('error', 'Memory recall skipped: credential-like text in task summary'); return
+    if (privateText.test(query) || query.includes(config.apiToken)) {
+      this.status('error', 'Memory recall skipped: credentials or private identifiers in the task summary'); return
     }
     try {
       const parsed = Recall.safeParse(await this.request(config, '/memories/recall', {
@@ -103,8 +102,8 @@ export class HindsightMemory {
       `Builds: ${proof.deployment.builds.map(build => `${build.service} #${build.number}`).join(', ')}`,
       'Before/after tests, test-worktree checks and post-deployment verification were recorded; ZenTao resolution was confirmed.',
       'Detailed evidence remains on the original ticket; raw reports and logs are not included.'].join('\n')
-    if (credentials.test(content) || content.includes(config.apiToken)) {
-      this.status('error', 'Memory export skipped: credential-like text in repair summary'); return
+    if (privateText.test(content) || content.includes(config.apiToken)) {
+      this.status('error', 'Memory export skipped: remove credentials and private identifiers from the repair summary'); return
     }
     const documentId = `dsh-superagent-${key(this.host.deployment().namespace, ticket.id)}`, scope = scoped(config)
     const id = key(scope, documentId), fingerprint = key(content)

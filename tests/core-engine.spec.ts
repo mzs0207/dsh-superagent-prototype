@@ -1062,6 +1062,23 @@ describe('ticket commands', () => {
     expect(runningAssignment(h.repo.tickets.get(ticketId)!)?.report?.state).toBe('blocked')
     expect(h.executor.start).not.toHaveBeenCalled()
   })
+  it('restarts a manual ticket a person woke after its blocked report, instead of stranding it', () => {
+    const h = harness({}, { prepareTicket: ticket => ({ ...ticket, resume: 'manual' }) })
+    const ticketId = accepted(h).ticketId!
+    const assignment = runningAssignment(h.repo.tickets.get(ticketId)!)!
+    h.engine.report(ticketId, { state: 'blocked', summary: 'Cannot reproduce; waiting for manual retry' })
+    // A person's follow-up reaches the ticket after the pause, which lifts the hold (see `waitsForPerson`).
+    h.tick(1)
+    h.engine.receive(trigger('3', { human: true }))
+    h.engine.inputsDelivered(ticketId, assignment.id, [])
+    vi.mocked(h.executor.start).mockClear()
+    h.engine.assignmentInterrupted(ticketId, assignment.id)
+    // The restart keeps the person's message from being silently dropped by a ticket that reports `working` but is gone.
+    const ticket = h.repo.tickets.get(ticketId)!
+    expect(ticket.assignments).toHaveLength(2)
+    expect(h.executor.start).toHaveBeenCalledOnce()
+    expect(ticketStage(ticket)).toEqual({ stage: 'working', action: 'queued' })
+  })
   it('keeps report-completed workflows open after merge and deployment failure until explicit verified completion', () => {
     const h = harness({}, { prepareTicket: ticket => ({ ...ticket, completion: 'report', resume: 'manual' }) })
     const ticketId = accepted(h).ticketId!

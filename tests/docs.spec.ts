@@ -65,4 +65,11 @@ describe('documentation', () => {
     expect(files('tests').filter(path => /\.spec\.tsx?$/.test(path) && !tests.includes(path))).toEqual([])
     expect(tests.filter(path => !existsSync(join(ROOT, path)))).toEqual([])
   })
+  it('names every DomainEvent of ports.ts in the event sentence of 007 Architecture', () => {
+    const declared = [...(read('src/core/ports.ts').match(/export interface DomainEvents \{([\s\S]*?)\n\}/)?.[1] ?? '')
+      .matchAll(/^\s*'([\w.]+)':/gm)].map(([, name]) => name!)
+    expect(declared.length).toBeGreaterThan(0)
+    const named = new Set([...read('docs/007-architecture.md').matchAll(/`([a-z]+\.[a-z-]+)`/g)].map(([, name]) => name!))
+    expect(declared.filter(name => !named.has(name))).toEqual([])
+  })
 })

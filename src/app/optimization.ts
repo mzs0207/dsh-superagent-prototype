@@ -17,6 +17,8 @@ const RETENTION_MS = 90 * 86_400_000
 export const privateText = /(?:\b(?:api[-_ ]?key|access[-_ ]?token|refresh[-_ ]?token|password|passwd|secret|authorization|cookie)\s*[:=]|\bBearer\s+\S+|-----BEGIN .*PRIVATE KEY-----|\b(?:sk-|ghp_|glpat-)[A-Za-z0-9_-]{12,}|\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.|\b(?:ou|oc|om)_[A-Za-z0-9]+|\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b|\b(?:10|127)\.\d+\.\d+\.\d+\b|\b192\.168\.\d+\.\d+\b|\b172\.(?:1[6-9]|2\d|3[01])\.\d+\.\d+\b|\/home\/[^\s/]+|[A-Z]:\\Users\\)/i
 const text = z.string().trim().max(2000).refine(value => !privateText.test(value), 'Remove credentials and private identifiers before recording a lesson')
 export const OptimizationLessonInput = z.object({
+  /** Stable caller-chosen id; omit to derive it from the content, which makes every edit a new lesson. */
+  id: z.string().regex(/^[a-f0-9]{8,64}$/).optional(),
   status: z.enum(['hypothesis', 'verified']), problem: text.min(1), change: text.min(1), validation: text, effect: text,
   evidence: z.array(text.min(1)).max(20),
 }).strict().superRefine((lesson, ctx) => {
@@ -46,7 +48,12 @@ export interface OptimizationGroup {
   kind: string; component: string; status: string; reason: string | null; count: number; averageDurationMs: number | null; maxDurationMs: number | null
 }
 export interface OptimizationReport {
-  since: string; until: string; recordingSince: string | undefined; retentionDays: number; groups: OptimizationGroup[]; caveats: string[]
+  since: string; until: string; recordingSince: string | undefined
+  /** Verified observations older than this are deleted. */
+  retentionDays: number
+  /** Recorded lessons are never deleted; this states it so no consumer mistakes `retentionDays` for their lifetime. */
+  lessonRetention: 'indefinite'
+  groups: OptimizationGroup[]; caveats: string[]
 }
 const elapsed = (start: string, end: string) => Math.max(0, Date.parse(end) - Date.parse(start))
 /** Only structured provider/OS error properties are classified; free-form error text is never retained or diagnosed. */
@@ -134,6 +141,7 @@ export class OptimizationLedger {
   private prune(): void {
     const now = this.now()
     if (now - this.prunedAt < 3_600_000) return
+    // Lessons are authored findings, not measurements, and are kept until removed on purpose; the report states both lifetimes.
     this.store.db.prepare('DELETE FROM optimization_record WHERE at < ?').run(new Date(now - RETENTION_MS).toISOString())
     this.store.afterCommit(() => { this.prunedAt = now })
   }
@@ -163,33 +171,59 @@ export class OptimizationLedger {
       value ->> '$.status' AS status, value ->> '$.reason' AS reason, COUNT(*) AS count,
       AVG(value ->> '$.durationMs') AS averageDurationMs, MAX(value ->> '$.durationMs') AS maxDurationMs
       FROM optimization_record WHERE at >= ? AND at <= ? GROUP BY kind, component, status, reason ORDER BY count DESC, kind, component, status, reason`).all(since, until) as unknown as OptimizationGroup[]
-    return { since, until, recordingSince: this.store.get(KV.optimization.startedAt), retentionDays: 90, groups,
+    return { since, until, recordingSince: this.store.get(KV.optimization.startedAt), retentionDays: 90,
+      lessonRetention: 'indefinite', groups,
       caveats: ['Only events observed since recording began; no historical backfill.', 'Durations include waiting; not model time or token cost.',
         'Ready/completed is not proof of deployment or verification.', 'Explicit retries may originate in the panel, a human follow-up or the main agent; they do not prove human intervention.',
         'Human inputs and resumed tickets are separate observations, not a count of distinct people.',
-        'Model fingerprints describe observed settings, not confirmed provider usage.'] }
+        'Model fingerprints describe observed settings, not confirmed provider usage.',
+        'Retention differs: observations expire after ninety days, recorded lessons persist until removed.'] }
   }
   lessons(query: OptimizationQuery = {}): OptimizationPage<OptimizationLesson> {
     const { offset, limit, since, until } = Query.parse(query)
+    // Verified lessons are kept indefinitely, so only the caller's own bounds apply; '' sorts below every stored time.
+    const lower = since ? new Date(since).toISOString() : ''
+    const upper = until ? new Date(until).toISOString() : new Date(this.now()).toISOString()
     const rows = this.store.db.prepare(`SELECT value FROM optimization_lesson WHERE at >= ? AND at <= ? ORDER BY at DESC, id DESC LIMIT ? OFFSET ?`)
-      .all(since ? new Date(since).toISOString() : '', until ? new Date(until).toISOString() : new Date(this.now()).toISOString(), limit + 1, offset)
-    return { items: rows.slice(0, limit).map(row => JSON.parse(String(row.value)) as OptimizationLesson), next_offset: rows.length > limit ? offset + limit : null }
+      .all(lower, upper, limit + 1, offset)
+    return { items: rows.slice(0, limit).map(row => JSON.parse(String(row.value)) as OptimizationLesson), next_offset: rows.length > limit ? offset + limit : null,
+      ...(since ? { since: lower } : {}), until: upper }
   }
+  /**
+   * Records one lesson under a caller-stable id, so an edited lesson replaces the earlier text instead of leaving a stale
+   * version beside it. The first submission fixes the id; later ones update the text and keep the original timestamp.
+   */
   saveLesson(input: unknown): OptimizationLesson {
-    const lesson = OptimizationLessonInput.parse(input), id = key(JSON.stringify(lesson))
+    const lesson = OptimizationLessonInput.parse(input), id = lesson.id ?? key(JSON.stringify(lesson))
     return this.store.atomic(() => {
       const previous = this.store.db.prepare('SELECT value FROM optimization_lesson WHERE id = ?').get(id)
-      const record: OptimizationLesson = previous ? JSON.parse(String(previous.value)) : { ...lesson, id, at: new Date(this.now()).toISOString() }
-      if (!previous) this.store.db.prepare('INSERT INTO optimization_lesson VALUES (?, ?, ?)').run(id, record.at, JSON.stringify(record))
-      if (record.status === 'verified') this.retain(record)
+      const record: OptimizationLesson = previous ? { ...lesson, id, at: JSON.parse(String(previous.value)).at }
+        : { ...lesson, id, at: new Date(this.now()).toISOString() }
+      this.store.db.prepare('INSERT INTO optimization_lesson VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET value = excluded.value')
+        .run(id, record.at, JSON.stringify(record))
+      if (record.status === 'verified') {
+        // A lesson authored now is exported now, so a later boot does not queue it a second time.
+        this.store.set(KV.optimization.exported(id), record.at)
+        this.retain(record)
+      }
       return record
     })
   }
-  /** Retry locally verified lessons once the private memory connection has loaded, without relying on remote availability. */
+  /**
+   * Queue verified lessons the memory connection has not taken yet, once each: the marker is written before the enqueue, so a
+   * persistently rejecting endpoint is not enqueued again on every restart.
+   */
   exportVerified(): void {
     this.observe(() => {
       const rows = this.store.db.prepare("SELECT value FROM optimization_lesson WHERE value ->> '$.status' = 'verified'").iterate()
-      for (const row of rows) this.retain(JSON.parse(String(row.value)) as OptimizationLesson)
+      this.store.atomic(() => {
+        for (const row of rows) {
+          const lesson = JSON.parse(String(row.value)) as OptimizationLesson
+          if (this.store.get(KV.optimization.exported(lesson.id))) continue
+          this.store.set(KV.optimization.exported(lesson.id), lesson.at)
+          this.retain(lesson)
+        }
+      })
     })
   }
 }

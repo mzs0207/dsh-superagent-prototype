@@ -10,6 +10,7 @@ import type { DecisionListView, SearchView, ThreadDetailView, ThreadListView } f
 import type { TicketListView } from './views/tickets.ts'
 import type { Conversations } from './conversations.ts'
 import type { LessonInput, OptimizationLesson, OptimizationPage, OptimizationQuery, OptimizationRecord, OptimizationReport } from './optimization.ts'
+import type { ManagedView, EnvironmentWrite, HostWrite, HostKeyProbe, ConnectionTest } from '../remote-ops/managed-types.ts'
 
 export const TICKET_FILTERS = ['open', 'person', 'working', 'idle', 'ended'] as const
 export const THREAD_FILTERS = ['subscribed', 'evaluating', 'recent', 'all'] as const
@@ -20,6 +21,16 @@ interface Paged { offset?: number; limit?: number }
 type Delivery = 'injected' | 'pending'
 
 export interface Api {
+  'GET remote': { response: ManagedView }
+  'POST remote/environments': { body: EnvironmentWrite; response: ManagedView }
+  'PUT remote/environments/:environment': { body: EnvironmentWrite; response: ManagedView }
+  'DELETE remote/environments/:environment': { body: { revision: number }; response: ManagedView }
+  'POST remote/environments/:environment/hosts': { body: HostWrite; response: ManagedView }
+  'PUT remote/environments/:environment/hosts/:host': { body: HostWrite; response: ManagedView }
+  'DELETE remote/environments/:environment/hosts/:host': { body: { revision: number }; response: ManagedView }
+  'POST remote/environments/:environment/hosts/:host/probe': { body: { revision: number }; response: HostKeyProbe }
+  'POST remote/environments/:environment/hosts/:host/trust': { body: { revision: number; token: string }; response: ManagedView }
+  'POST remote/environments/:environment/hosts/:host/test': { body: { revision: number }; response: ConnectionTest }
   'GET optimization': { query?: OptimizationQuery; response: OptimizationReport }
   'GET optimization/records': { query?: OptimizationQuery; response: OptimizationPage<OptimizationRecord> }
   'GET optimization/lessons': { query?: OptimizationQuery; response: OptimizationPage<OptimizationLesson> }

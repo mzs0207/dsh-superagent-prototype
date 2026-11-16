@@ -122,10 +122,11 @@ function showError(error) {
   byId('error').textContent = error instanceof TypeError ? '无法连接电脑，请检查网络与服务。' : error.message
   byId('error').hidden = false
 }
+/** Read-only view of one conversation's submissions; only `sendSubmission` creates an entry, so browsing cannot grow this. */
 function pendingFor(id) {
-  if (!submissions.has(id)) submissions.set(id, new Map())
-  return submissions.get(id)
+  return submissions.get(id) ?? EMPTY
 }
+const EMPTY = new Map()
 function updateComposer() {
   const blocked = [...pendingFor(route.conversation).values()].some(item => item.state !== 'accepted')
   byId('send-message').disabled = !chatReady || blocked || !byId('message').value.trim()
@@ -169,15 +170,17 @@ function conversationFrame(frame) {
     byId('chat-title').textContent = chatInfo.title
     byId('chat-info').textContent = `${kinds[chatInfo.kind]} · ${chatInfo.running ? '运行中' : '空闲'}`
     byId('older').hidden = !frame.hasMore; byId('older').disabled = false
-    for (const pending of frame.pending) pendingFor(route.conversation).set(pending.requestId, { ...pending, state: 'accepted' })
-    for (const message of frame.messages) if (message.requestId) pendingFor(route.conversation).delete(message.requestId)
+    // Only ever adopt requests this page sent; browsing a conversation must not create an entry for it.
+    const own = submissions.get(route.conversation)
+    if (own) for (const pending of frame.pending) if (own.has(pending.requestId)) own.set(pending.requestId, { ...pending, state: 'accepted' })
+    if (own) for (const message of frame.messages) if (message.requestId) own.delete(message.requestId)
     renderMessages(); showPending()
     byId('live-text').textContent = frame.live; byId('live').hidden = !frame.live
     byId('connection').textContent = '已连接 · 实时更新'; byId('error').hidden = true
     content.setAttribute('aria-busy', 'false')
   } else if (frame.type === 'message') {
     messages.set(frame.message.seq, frame.message)
-    if (frame.message.requestId) pendingFor(route.conversation).delete(frame.message.requestId)
+    if (frame.message.requestId) submissions.get(route.conversation)?.delete(frame.message.requestId)
     renderMessages(); showPending()
   } else if (frame.type === 'live') {
     byId('live-text').textContent = frame.text; byId('live').hidden = !frame.text
@@ -227,6 +230,9 @@ function newId() {
 }
 async function sendSubmission(id, item) {
   item.state = 'sending'
+  // A retry of a failed message may follow a page reload, which dropped the map entry.
+  if (!submissions.has(id)) submissions.set(id, new Map())
+  pendingFor(id).set(item.requestId, item)
   if (route.conversation === id) showPending()
   try {
     await post(`/api/conversations/${encodeURIComponent(id)}/messages`, { requestId: item.requestId, text: item.text })
@@ -307,11 +313,17 @@ byId('back').onclick = () => { location.hash = route.conversation ? '#conversati
 const pageHash = offset => route.conversations ? `conversations&offset=${offset}` : `state=${route.state}&offset=${offset}`
 byId('previous').onclick = () => { location.hash = pageHash(Math.max(0, route.offset - 20)) }
 byId('next').onclick = () => { if (nextOffset !== null) location.hash = pageHash(nextOffset) }
-byId('message').oninput = () => { drafts.set(route.conversation, byId('message').value); updateComposer() }
+byId('message').oninput = () => {
+  const id = route.conversation, value = byId('message').value
+  // Keep only the conversations being drafted in; a long browsing session must not retain every draft.
+  if (value) drafts.set(id, value); else drafts.delete(id)
+  updateComposer()
+}
 byId('composer').onsubmit = event => {
   event.preventDefault()
   if (byId('send-message').disabled) return
   const id = route.conversation, item = { requestId: newId(), text: byId('message').value.trim(), state: 'sending' }
+  if (!submissions.has(id)) submissions.set(id, new Map())
   pendingFor(id).set(item.requestId, item)
   byId('message').value = ''; drafts.delete(id)
   void sendSubmission(id, item)

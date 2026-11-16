@@ -36,6 +36,8 @@ import { preview, readable } from '../src/app/views/text.ts'
 import { decisionList, search, threadDetail, threadList } from '../src/app/views/threads.ts'
 import { executorLoad, ticketDetail, ticketList } from '../src/app/views/tickets.ts'
 
+// Tests also run inside DSH worker shells, which may already set this variable.
+const inheritedGitConfigGlobal = process.env.GIT_CONFIG_GLOBAL
 let runtime: Runtime
 const viewsOf = (value: Runtime) => ({ store: value.store, sources: value.sources, links: value.links() })
 const overviewOf = (value: Runtime) => overview(viewsOf(value), value.health, policyVersion(value.store.settings()), executorLoad(value.store, value.executor.activeCount()), value.setupProblem ?? value.feishuProblem)
@@ -48,6 +50,7 @@ let sections: Map<string, Section>
 type Guard = (execution?: { name: string; arguments: unknown }) => string | undefined
 let guards: Map<string, Guard>
 let restricts: Map<string, unknown[]>
+let remoteToolsInstalled = false
 type HttpHandler = (req: unknown, res: unknown) => Promise<void>
 let http: HttpHandler
 async function api(method: string, path: string): Promise<{ status: number; body: unknown }> {
@@ -159,6 +162,7 @@ beforeEach(async () => {
   sections = new Map()
   guards = new Map()
   restricts = new Map()
+  remoteToolsInstalled = false
   deliveries = vi.fn()
   controller = {
     create: vi.fn(async ({ sessionId, agentPreset }) => {
@@ -166,7 +170,8 @@ beforeEach(async () => {
       const agentCtx = new Context()
       const preset = {}
       const inherited = ['bash', 'read', 'read_image', 'skill', 'job_output', 'job_list', 'job_kill', 'grep', 'web_search',
-        'ask_user_question', 'plugin_manager', 'schedule_create', 'create_goal', 'session_create', 'session_send_message', 'feishu_doc_edit']
+        'ask_user_question', 'plugin_manager', 'schedule_create', 'create_goal', 'session_create', 'session_send_message', 'feishu_doc_edit',
+        ...(remoteToolsInstalled ? ['remote_ops_inventory', 'remote_ops_inspect'] : [])]
       const sessionTools = new Map<string, RegisteredTool>()
       tools.set(sessionId, sessionTools)
       agentCtx.reflect.provide('tools', { register: (tool: RegisteredTool) => { sessionTools.set(tool.name,
@@ -983,7 +988,7 @@ it('runs setup again while the Feishu bot check failed, and restores the process
   const broken = await restart()
   await broken.ready
   expect(broken.setupProblem).toMatchObject({ place: 'deployment', code: 'gitTooOld' })
-  expect(process.env.GIT_CONFIG_GLOBAL).toBeUndefined()
+  expect(process.env.GIT_CONFIG_GLOBAL).toBe(inheritedGitConfigGlobal)
   expect(process.env.PATH?.split(':')).not.toContain(join(directory, 'worker-bin'))
 })
 
@@ -1003,7 +1008,7 @@ it('writes worker shims and the agent environment from the configuration only, a
   expect(process.env.GIT_AUTHOR_NAME).toBeUndefined()
   expect(process.env.PATH?.split(':')[0]).toBe(bin)
   await next.stop()
-  expect(process.env.GIT_CONFIG_GLOBAL).toBeUndefined()
+  expect(process.env.GIT_CONFIG_GLOBAL).toBe(inheritedGitConfigGlobal)
   expect(process.env.PATH?.split(':')).not.toContain(bin)
 })
 
@@ -1581,6 +1586,18 @@ it('refuses an ended ticket\'s worker its tools, and restricts the main Session 
   // A worker keeps only the profile's work tools: none that ask a person, change the profile, schedule or start work outside
   // the worker slots, reach other Sessions or edit documents, whenever they were registered.
   expect(restricts.get(sessionId)).toEqual([{ allow: ['read', 'read_image', 'grep', 'bash', 'job_output', 'job_list', 'job_kill', 'web_search', 'skill'] }])
+})
+
+it('allows installed read-only diagnostic tools on workers, but not on the router, and still guards ended tickets', async () => {
+  remoteToolsInstalled = true
+  const { ticket, sessionId } = await acceptedTicket()
+  const rules = restricts.get(sessionId) as { allow: string[] }[]
+  expect(rules[0]!.allow).toEqual(expect.arrayContaining(['remote_ops_inventory', 'remote_ops_inspect']))
+  const router = restricts.get(runtime.masterId) as { allow: string[] }[]
+  expect(router[0]!.allow).not.toContain('remote_ops_inspect')
+  expect(guards.get(sessionId)!()).toBeUndefined()
+  runtime.engine.stopTicket(ticket.id)
+  expect(guards.get(sessionId)!()).toBe('Ticket ended; new work needs a new authorized ticket')
 })
 
 it('gives an explicit ticket\'s worker a prompt without the limits of an inferred Mandate', async () => {

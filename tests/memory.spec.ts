@@ -83,6 +83,24 @@ it('retains verified repair facts and revision evidence, never raw logs or trans
   expect(JSON.stringify(retain.body)).not.toMatch(/RAW|do-not-export|fixture-memory-credential/)
 })
 
+it('does not export a repair summary that names an address, a person or a home path', async () => {
+  // The ledger's sanitizer already rejected these; the export path must apply the same rule, not a narrower credential one.
+  const causes = ['Fix on 192.168.10.21 test host', 'Root cause: user li.si@acme.com', 'Edits in /home/mzs/widgets/src',
+    'Feishu open id ou_9f2c1a7b']
+  for (const [index, cause] of causes.entries()) {
+    const { ticket, trigger } = await h.acceptedTicket(feishu(`memory-private-${index}`, 'Fix nullable assignees'))
+    h.runtime.store.triggers.save({ ...trigger, source: 'zentao', meta: { repository: h.runtime.deployment.webUrl } })
+    h.runtime.store.set(KV.zentao.workflow(ticket.id), { cause, changes: 'Normalize null', head: 'a'.repeat(40),
+      reproduction: 'Reproduced', tests: 'Passed', mr: 7, mergeCommit: 'c'.repeat(40), testCommit: 'b'.repeat(40),
+      testVerification: 'Verified', published: true, resolved: true, liveVerification: 'Verified',
+      deployment: { at: new Date().toISOString(), builds: [{ service: 'api', number: 8, url: 'https://ci.invalid/8', commit: 'b'.repeat(40) }] } })
+    h.runtime.engine.report(ticket.id, { state: 'ready', summary: 'Done' })
+    await h.runtime.idle()
+  }
+  expect(requests.filter(request => request.path.endsWith('/memories'))).toEqual([])
+  expect(JSON.stringify(h.runtime.health)).toMatch(/private identifiers/i)
+})
+
 it('does not turn a ready report and publication-only checkpoint into verified memory', async () => {
   await finish(false)
   expect(requests.filter(request => request.path.endsWith('/memories'))).toEqual([])

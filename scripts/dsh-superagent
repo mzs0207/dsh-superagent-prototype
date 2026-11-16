@@ -218,13 +218,17 @@ def optimization(args):
     parsed = urllib.parse.urlsplit(args.url)
     if parsed.scheme != 'http' or parsed.hostname not in ('127.0.0.1', 'localhost', '::1') or parsed.username or parsed.password:
         raise RuntimeError('Optimization records require the local loopback HTTP management URL.')
-    parameters = {name: value for name, value in (('since', args.since), ('until', args.until),
-                  ('offset', args.offset), ('limit', args.limit)) if value is not None}
-    path = 'optimization' + ('' if args.view == 'summary' else '/' + args.view)
-    data = None
     if args.lesson_file:
+        # A submitted lesson is a POST to one resource; a different view or a time window would be silently ignored.
+        if args.view != 'summary' or args.since or args.until:
+            raise RuntimeError('--lesson-file submits a lesson; it cannot be combined with --view, --since or --until.')
+        path, parameters = 'optimization/lessons', {}
         data = json.dumps(json.loads(Path(args.lesson_file).read_text()), ensure_ascii=False).encode()
-        path = 'optimization/lessons'
+    else:
+        path = 'optimization' + ('' if args.view == 'summary' else '/' + args.view)
+        parameters = {name: value for name, value in (('since', args.since), ('until', args.until),
+                      ('offset', args.offset), ('limit', args.limit)) if value is not None}
+        data = None
     request = urllib.request.Request(args.url.rstrip('/') + '/orchestrator/api/' + path + '?' + urllib.parse.urlencode(parameters),
                                      data=data, headers={'x-orchestrator-request': '1', 'content-type': 'application/json'})
     # A management response must not redirect records or a submitted lesson to a different endpoint.

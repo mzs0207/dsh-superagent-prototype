@@ -21,7 +21,11 @@ export function receiveZentaoFollowup(host: FollowupHost, trigger: Trigger): Rec
   const root = trigger.meta.rootId ?? trigger.meta.parentId
   if (typeof root !== 'string') return
   const { store, sources, engine, outbox } = host
-  const topicKeys = store.keys(KV.zentao.feishuTopic).filter(name => store.get(name) === root)
+  // The index answers most messages in one lookup. Topic keys are hashed and cannot be reversed, so a root recorded before
+  // the index existed falls back to the topic family, as before.
+  const indexed = store.get(KV.zentao.feishuRoot(root))
+  const topicKeys = indexed ? [KV.zentao.feishuTopic(indexed)]
+    : store.keys(KV.zentao.feishuTopic).filter(name => store.get(name) === root)
   if (!topicKeys.length) return
   return store.atomic(() => {
     if (store.triggers.get(trigger.id)) return 'duplicate'

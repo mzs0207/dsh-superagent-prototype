@@ -104,7 +104,7 @@ When a Ticket ends, unread follow-ups return to Eval unless another Ticket still
 
 After a change, the Engine emits an event from `DomainEvents` in `src/core/ports.ts`:
 
-`trigger.received`, `eval.started`, `decision.recorded`, `ticket.created`, `ticket.resumed`, `ticket.ended`, `assignment.started`, `assignment.ended`, `thread.subscribed`, `thread.unsubscribed`, `trigger.requeued`, or `policy.changed`.
+`trigger.received`, `trigger.followup`, `eval.started`, `decision.recorded`, `ticket.created`, `ticket.resumed`, `ticket.human-input`, `ticket.ended`, `assignment.started`, `assignment.reported`, `assignment.ended`, `thread.subscribed`, `thread.unsubscribed`, `trigger.requeued`, or `policy.changed`.
 
 Runtime turns `ticket.ended`, `trigger.requeued` and `thread.unsubscribed` into notices. A human `trigger.received` delivered to Tickets becomes a follow-up relay. Shared `changeEndNotices` sends one stable-id chat notice when a Ticket ends merged/closed, retaining existing GitHub IDs and namespacing GitLab IDs.
 
@@ -305,6 +305,12 @@ Generic modules have the following deliberate Source-specific boundaries:
 - Setup checks selected GitHub/GitLab and optional Feishu fields (`SETUP_FIELDS`), passing provider-scoped problems through `SourceContext.problem`.
 
 
+### Remote environment management
+
+`Runtime` owns `ManagedRemoteOps` as the `remoteOps` Cordis service before repository setup finishes. Its UI-only management API uses the existing same-origin loopback handler; no management write or credential retrieval is registered as an agent tool. Its store lives under the private main stateDir and drains writes before that directory's process lock is released. The browser receives metadata and a `hasPassword` flag, never ciphertext or passwords. Fingerprint probes send no authentication; trust requires a short-lived endpoint/revision-bound token and password connections pin the verified key.
+
+The independent remote-ops tool plugin preserves legacy inventoryFile/OpenSSH mode. Without an explicit file, it delegates inventory and fixed diagnostics to the managed service. The common runner shares cancellation, bounded output and connection slots with UI checks. This is not an account-level sandbox or per-user authorization boundary; local Host access and SSH account privileges remain the operator's responsibility.
+
 ## Modules
 
 | Path | Responsibility |
@@ -424,6 +430,15 @@ Generic modules have the following deliberate Source-specific boundaries:
 | `src/client/marks.ts` | The marks of the states the views classify: a Ticket's or a Thread's stage, a Source's state and a Decision's outcome, each as a dot, an icon, a tone and a label |
 | `src/client/locales.ts` | All copy in both languages, and the glossary of [001 Domain model](001-domain.md) |
 | `src/client/client.css`, `css.d.ts` | The panel's stylesheet, loaded as text |
+| `src/remote-ops/index.ts` | Native read-only tools: prefer explicitly configured legacy file, otherwise delegate to the Runtime-managed password service; cancellation/disposal waits for delegated work |
+| `src/remote-ops/inventory.ts` | Bounded, dynamically read JSON environment/server/Compose inventory; strict schemas, normalized exact selectors and credential-free discovery |
+| `src/remote-ops/commands.ts` | All-target preflight, fixed read-only Docker/Linux commands, shell-data quoting and hardened noninteractive OpenSSH argv |
+| `src/remote-ops/runner.ts` | Bounded stdout/stderr, timeout/cancellation/process-group cleanup, shared connection slots for tests/probes/diagnostics, managed transport adapter and per-server evidence without workspace switching |
+| `src/remote-ops/managed-types.ts` | Strict public UI write schemas, password-free environment/host DTOs and non-sensitive errors; browser consumers import types only |
+| `src/remote-ops/managed-store.ts` | Private lazy AES-256-GCM vault: UUID AAD, owner/permission/file-type checks, atomic snapshots, serialized revision CAS, credential-free views and drain-on-close |
+| `src/remote-ops/password-ssh.ts` | ssh2 password authentication, unauthenticated fingerprint probe, strict fingerprint pins, bounded command output and cancellable connection-only tests |
+| `src/remote-ops/managed.ts` | Runtime remoteOps service: encrypted store, endpoint/revision-bound single-use trust challenges, password-free tool discovery and fixed read-only command execution |
+| `src/client/remote.tsx` | Environment/host/Compose management tab, inline CRUD/CAS/delete confirmation, ephemeral password inputs, fingerprint review and connection tests with stale-response isolation |
 | `src/mobile/gateway.ts` | Private HTTP listener: password login, bounded authentication, fixed loopback task projections, allowlisted JSON conversation writes and cancellable SSE forwarding |
 | `src/mobile/cli.ts` | Private password-hash setup, password changes and foreground viewer lifecycle; leaves the DSH profile unchanged |
 | `src/mobile/view.html`, `view.js`, `view.css` | Touch task/conversation tabs, safe text rendering, pagination/history, in-page drafts, stable submission IDs and visibility-aware polling/streaming |
@@ -432,7 +447,7 @@ Generic modules have the following deliberate Source-specific boundaries:
 | `apps/android/app/src/main/java/dev/dsh/superagent/viewer/ServerDiscovery.java`, `DiscoveryTargets.java`, `GatewayClient.java` | Bounded private /24 HTTP discovery, saved-origin probing and explicit redirect-free native login |
 | `apps/android/app/src/main/java/dev/dsh/superagent/viewer/ServerStore.java`, `PasswordCipher.java` | Saved server metadata and Android Keystore AES-GCM credentials bound to origin and server fingerprint |
 
-`src/sources/github.ts` and `src/sources/feishu.ts` are also the entries of the two Source plugins, built by `tsdown.config.ts` and exported in `package.json` as `./github-watch` and `./feishu-watch`. The bundle's `cordis.patch.yml` inserts the three plugins, with Feishu disabled.
+The Source entries under `src/sources` are built by `tsdown.config.ts` and exported in `package.json` as `./github-watch`, `./gitlab-watch`, `./zentao-watch` and `./feishu-watch`. The bundle's `cordis.patch.yml` inserts them alongside the main plugin, with Feishu disabled. The independent `./remote-ops` entry registers before managed Sessions compute their inherited tool allowlist; an empty inventoryFile prevents SSH connections.
 
 ## Tests
 
@@ -469,6 +484,12 @@ Generic modules have the following deliberate Source-specific boundaries:
 | `tests/tools.spec.ts` | The Sessions' tools: what `orchestrator_read` reads for each role, and the shapes and checks of the other main Session tools |
 | `tests/runtime-concurrency.spec.ts` | Work that overlaps: Triggers during a pass, Tickets that change during deliveries and launches |
 | `tests/http.spec.ts` | The same-origin and loopback checks, the status of each kind of failure, the body limit, path parameters and queries |
+| `tests/remote-ops-model.spec.ts` | Environment aliases, inventory bounds and strict validation, multi-machine/project preflight, command injection resistance, fixed read-only actions and SSH security options; local fake Docker only |
+| `tests/remote-ops-runner.spec.ts` | Output bounds, timeout/cancellation/kill, shared concurrency, failure isolation, dynamic inventory, canonical tool schemas and plugin disposal; local fixture processes only |
+| `tests/remote-ops-store.spec.ts` | Vault file permissions, restart/decryption, no plaintext snapshots, CAS/uniqueness, pin invalidation, tamper/UUID replay/key loss and atomic failure recovery |
+| `tests/remote-ops-password.spec.ts` | Real password authentication against ephemeral loopback SSH fixtures, no-auth fingerprint probes, changed-key refusal before password, bounded output, timeout and cancellation |
+| `tests/remote-ops-http.spec.ts` | Same-origin remote CRUD, secret-free GET/errors, trust-token expiry/revision/single-use, managed tools, disconnect/disposal cancellation and vault drain-on-stop |
+| `tests/panel-remote.spec.tsx` | Environment and host CRUD, optional Compose projects, password clearing/non-persistence, CAS conflict, fingerprint confirmation, actual connection status and response isolation |
 | `tests/mobile.spec.ts` | Real HTTP password login, credential-free discovery and stable fingerprints, session cookies, cross-origin/method/path restrictions, password body limits, explicit task fields and upstream failures |
 | `tests/conversations.spec.ts` | Conversation projection/privacy, retained interrupted history and failure status, concurrent/claimed-message deduplication, input admission boundaries and real ticket-engine/background-work stopping |
 | `apps/android/app/src/test/java/dev/dsh/superagent/viewer/ServerAddressTest.java` | Private numeric HTTP origins and conversation-write confinement, including credential, port, path and prefix-confusion attacks |

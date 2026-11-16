@@ -54,6 +54,9 @@ it('shows a Ticket with its stage, its Mandate details with the Trigger and Deci
   await mount()
   await click(all('.dt-open').find(button => button.textContent === '修复回归')!)
   expect(document.querySelector('.dt-page-title h2')?.textContent).toBe('修复回归')
+  // The delivery evidence carries the worker's own conclusion, so a blocked or failed summary stays visible on the page.
+  expect(text()).toContain(zh.deliverySummary)
+  expect(text()).toContain('working on it')
   expect(document.querySelector('.dt-status-line .dt-stage')?.textContent).toBe(zh.executingLabel)
   expect(document.querySelector('.dt-status-line .dt-stage .dt-spinner')).not.toBeNull()
   // A Thread this Ticket follows reads as subscribed on its page, though no other Ticket follows it.

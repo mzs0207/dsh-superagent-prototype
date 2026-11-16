@@ -29,9 +29,12 @@ import { decisionList, search, threadDetail, threadList } from './views/threads.
 import { executorLoad, ticketDetail, ticketList } from './views/tickets.ts'
 import { Conversations } from './conversations.ts'
 import type { OptimizationLedger } from './optimization.ts'
+import type { ManagedRemoteOps } from '../remote-ops/managed.ts'
+import { DeleteSchema, EnvironmentWriteSchema, HostWriteSchema, RemoteManagementError } from '../remote-ops/managed-types.ts'
 
 export interface HttpHost {
   readonly store: Store
+  readonly remote: ManagedRemoteOps
   readonly optimization: Pick<OptimizationLedger, 'records' | 'summary' | 'lessons' | 'saveLesson'>
   /** Feishu message links resolved since startup, used by search to match AppLink URLs. */
   readonly sourceLinks: Pick<TextCache, 'entries'>
@@ -86,11 +89,13 @@ function failure(error: unknown): [number, Record<string, unknown>] {
     const issues = error.issues.map(issue => ({ path: issue.path.join('.'), message: issue.message }))
     return [400, { error: `Invalid settings: ${issues.map(issue => issue.path).join(', ')}`, issues }]
   }
+  if (error instanceof RemoteManagementError) return [error.status, { error: error.message, code: error.code }]
   if (error instanceof SetupError) return [400, { error: error.message, setup: error.problem }]
   if (error instanceof RouteError) return [error.status, { error: error.message }]
   if (error instanceof UserError) return [error.missing ? 404 : 400, { error: error.message, code: error.code, values: error.values }]
   if (error instanceof SettingsConflict || error instanceof PromptConflict) return [409, { error: error.message }]
-  if (error instanceof Error && 'code' in error) {
+  // Only the Session controller's own failures carry conversation meaning; other errors may also have a `code`.
+  if (error instanceof Error && (error as { isDSHRemoteError?: unknown }).isDSHRemoteError === true && 'code' in error) {
     if (error.code === 'session/not-found') return [404, { error: 'Conversation not found' }]
     if (['session/writer-held', 'session/agent-busy', 'session/migration-required'].includes(String(error.code))) {
       return [409, { error: 'Conversation is unavailable in its current state' }]
@@ -141,7 +146,7 @@ function promptsView(runtime: HttpHost, revision: number | undefined, offset: nu
 export type PromptsView = ReturnType<typeof promptsView>
 
 interface Input<K extends keyof Api> {
-  params: RouteParams<K>; query: Record<string, string>; body: (maxBytes?: number) => Promise<unknown>
+  params: RouteParams<K>; query: Record<string, string>; body: (maxBytes?: number) => Promise<unknown>; signal: AbortSignal
 }
 type Routes = { [K in keyof Api]: (input: Input<K>) => ApiResponse<K> | Promise<ApiResponse<K>> }
 const offset = z.coerce.number().int().nonnegative().catch(0)
@@ -162,6 +167,16 @@ function routes(runtime: HttpHost, conversations: Conversations): Routes {
   const ticket = (id: string) => { if (!store.tickets.get(id)) throw new RouteError(404, 'Ticket not found'); return id }
   const promptBody = (input: { body: (maxBytes?: number) => Promise<unknown> }) => input.body(4 * runtime.machine.promptMaxChars.get() + 4096)
   return {
+    'GET remote': () => runtime.remote.store.view(),
+    'POST remote/environments': async ({ body }) => runtime.remote.store.createEnvironment(EnvironmentWriteSchema.parse(await body())),
+    'PUT remote/environments/:environment': async ({ params, body }) => runtime.remote.store.updateEnvironment(params.environment, EnvironmentWriteSchema.parse(await body())),
+    'DELETE remote/environments/:environment': async ({ params, body }) => runtime.remote.store.deleteEnvironment(params.environment, DeleteSchema.parse(await body()).revision),
+    'POST remote/environments/:environment/hosts': async ({ params, body }) => runtime.remote.store.createHost(params.environment, HostWriteSchema.parse(await body())),
+    'PUT remote/environments/:environment/hosts/:host': async ({ params, body }) => runtime.remote.store.updateHost(params.environment, params.host, HostWriteSchema.parse(await body())),
+    'DELETE remote/environments/:environment/hosts/:host': async ({ params, body }) => runtime.remote.store.deleteHost(params.environment, params.host, DeleteSchema.parse(await body()).revision),
+    'POST remote/environments/:environment/hosts/:host/probe': async ({ params, body, signal }) => runtime.remote.probe(params.environment, params.host, await body(), signal),
+    'POST remote/environments/:environment/hosts/:host/trust': async ({ params, body }) => runtime.remote.trust(params.environment, params.host, await body()),
+    'POST remote/environments/:environment/hosts/:host/test': async ({ params, body, signal }) => runtime.remote.test(params.environment, params.host, await body(), signal),
     'GET optimization': ({ query }) => runtime.optimization.summary(query),
     'GET optimization/records': ({ query }) => runtime.optimization.records(query),
     'GET optimization/lessons': ({ query }) => runtime.optimization.lessons(query),
@@ -254,6 +269,10 @@ export function registerHttp(ctx: Context, runtime: HttpHost): () => void {
       const url = new URL(req.url ?? '/', 'http://localhost')
       if (!url.pathname.startsWith('/orchestrator/api/')) { res.writeHead(404); res.end(); return }
       if (!sameOrigin(req, ctx.webServer.port)) { json(res, 403, { error: 'Same-origin management request required' }); return }
+      const request = new AbortController()
+      const disconnect = () => request.abort()
+      req.once?.('aborted', disconnect)
+      res.once?.('close', disconnect)
       try {
         await runtime.ready
         const stream = /^\/orchestrator\/api\/conversations\/([A-Za-z0-9_-]{1,160})\/events$/.exec(url.pathname)
@@ -263,8 +282,10 @@ export function registerHttp(ctx: Context, runtime: HttpHost): () => void {
         const route = match(table, req.method ?? 'GET', url.pathname.slice('/orchestrator/api/'.length).split('/'))
         if (!route) throw new RouteError(404, 'Unknown operation')
         const query = Object.fromEntries(url.searchParams)
-        json(res, 200, await route.run({ params: route.params as never, query, body: maxBytes => readBody(req, maxBytes) }))
-      } catch (error) { json(res, ...failure(error)) }
+        json(res, 200, await route.run({ params: route.params as never, query, body: maxBytes => readBody(req, maxBytes),
+          signal: AbortSignal.any([request.signal, stopped.signal]) }))
+      } catch (error) { if (!request.signal.aborted) json(res, ...failure(error)) }
+      finally { req.removeListener?.('aborted', disconnect); res.removeListener?.('close', disconnect) }
     } })]
   return () => { stopped.abort(); for (const dispose of disposers) dispose() }
 }

@@ -52,6 +52,24 @@ it('requires evidence for verified lessons and keeps hypotheses separate', async
   expect(await h.api('POST', 'optimization/lessons', { ...hypothesis, problem: 'password=do-not-store' })).toMatchObject({ status: 400 })
 })
 
+it('replaces an edited lesson under a stable id instead of leaving the stale version beside it', async () => {
+  const lesson = { id: 'a'.repeat(8), status: 'hypothesis', problem: 'Launch times out', change: 'Raise the limit',
+    validation: '', effect: '', evidence: [] }
+  const created = await h.api('POST', 'optimization/lessons', lesson)
+  expect(created).toMatchObject({ status: 200, body: { id: lesson.id } })
+  const edited = await h.api('POST', 'optimization/lessons', { ...lesson, change: 'Raise the limit and retry once' })
+  expect(edited).toMatchObject({ status: 200, body: { change: 'Raise the limit and retry once' } })
+  // The edit keeps the lesson's original timestamp and leaves exactly one row: no stale duplicate is readable.
+  expect(edited.body).toMatchObject({ at: (created.body as { at: string }).at })
+  const lessons = await h.api('GET', 'optimization/lessons')
+  expect((lessons.body as { items: { change: string }[] }).items).toEqual([expect.objectContaining({ change: 'Raise the limit and retry once' })])
+})
+
+it('states both retention lifetimes so no consumer mistakes one for the other', async () => {
+  const summary = await h.api('GET', 'optimization')
+  expect(summary.body).toMatchObject({ retentionDays: 90, lessonRetention: 'indefinite' })
+})
+
 it('does not let observation storage failure change a worker report or retry behavior', async () => {
   const { ticket } = await h.acceptedTicket(feishu('optimization3', 'Fix a regression'))
   h.runtime.store.db.exec("CREATE TRIGGER reject_observation BEFORE INSERT ON optimization_record BEGIN SELECT RAISE(ABORT, 'fixture disk error'); END")

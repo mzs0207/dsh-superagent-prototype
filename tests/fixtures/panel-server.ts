@@ -22,6 +22,8 @@ import { githubKind } from '../../src/sources/github.ts'
 import type { Health } from '../../src/sources/host.ts'
 import type { SourceKind } from '../../src/sources/kind.ts'
 import { testDeployment } from './deployment.ts'
+import { DeleteSchema, EnvironmentWriteSchema, HostWriteSchema, ProbeSchema, TrustSchema } from '../../src/remote-ops/managed-types.ts'
+import type { ConnectionTest, HostKeyProbe, ManagedView } from '../../src/remote-ops/managed-types.ts'
 
 export const MEMBER = 'ou_alice'
 const ALLOWED: Record<string, { id: string; name?: string }[]> = { feishu: [{ id: MEMBER, name: 'Alice' }], github: [{ id: 'alice' }] }
@@ -85,6 +87,11 @@ export const MACHINE = { stateDir: '/srv/dsh-superagent', promptMaxChars: 100000
 
 type Settings = ReturnType<typeof SettingsSchema.parse>
 export interface PanelServer {
+  remote: ManagedView
+  remotePasswords: Record<string, string>
+  remoteChallenges: Record<string, { environment: string; host: string; revision: number; probe: HostKeyProbe }>
+  remoteTest: ConnectionTest
+  remoteWaiting?: (operation: 'get' | 'probe' | 'test', host?: string) => Promise<void>
   joined?: Record<string, string>; joining?: Record<string, string>
   joinError?: string
   settings: Settings; revisions: Record<string, number>
@@ -247,6 +254,8 @@ function initial(): PanelServer {
     en: 'Feishu message' } }
   const defaults = { revision: 0, previousRevision: null, savedAt: '', source: 'defaults' }
   return {
+    remote: { revision: 0, environments: [] }, remotePasswords: {}, remoteChallenges: {},
+    remoteTest: { ok: true, message: 'Authentication succeeded', durationMs: 12 },
     health: {}, down: false, pending: 0, opened: [], requests: [], misuse: [], queued: new Set(), dropped: [], failing: [],
     setup: { machine: MACHINE, problem: null, feishuProblem: null,
       accounts: { repository: 'acme/widgets', agent: 'agent-bot', feishu: { appId: 'cli_bot', brand: 'feishu', botId: 'ou_bot',
@@ -290,7 +299,114 @@ const ticketOf = (id: string) =>
   [...server.tickets.open, ...server.person, ...server.tickets.ended].find(ticket => ticket.id === id) ?? server.ticketDetails[id]
 const SourceSave = z.object({ enabled: z.boolean(), config: z.unknown() })
 
+const remoteView = () => structuredClone(server.remote)
+const remoteEnvironment = (id: string) => server.remote.environments.find(item => item.id === id)
+const remoteHost = (environment: string, host: string) => remoteEnvironment(environment)?.hosts.find(item => item.id === host)
+function remoteWrite(revision: number, write: () => void | Refusal): ManagedView | Refusal {
+  if (revision !== server.remote.revision) return refuse(409, 'Inventory changed. Reload before saving.')
+  const failure = write()
+  if (failure) return failure
+  server.remote.revision++
+  return remoteView()
+}
+const REMOTE_FINGERPRINT = `SHA256:${'a'.repeat(43)}`
+
 const ROUTES: { [K in keyof Api]: Route<K> } = {
+  'GET remote': { answer: async () => { const view = remoteView(); await server.remoteWaiting?.('get'); return view } },
+  'POST remote/environments': { body: true, answer: ({ body }) => {
+    const parsed = EnvironmentWriteSchema.safeParse(body)
+    if (!parsed.success) return refuse(400, 'Invalid environment')
+    const { revision, ...value } = parsed.data
+    return remoteWrite(revision, () => { server.remote.environments.push({ id: crypto.randomUUID(), ...value, hosts: [] }) })
+  } },
+  'PUT remote/environments/:environment': { body: true, answer: ({ params, body }) => {
+    const parsed = EnvironmentWriteSchema.safeParse(body)
+    if (!parsed.success) return refuse(400, 'Invalid environment')
+    const { revision, ...value } = parsed.data
+    return remoteWrite(revision, () => {
+      const environment = remoteEnvironment(params.environment)
+      if (!environment) return refuse(404, 'Environment not found')
+      Object.assign(environment, value)
+    })
+  } },
+  'DELETE remote/environments/:environment': { body: true, answer: ({ params, body }) => {
+    const parsed = DeleteSchema.safeParse(body)
+    if (!parsed.success) return refuse(400, 'Invalid revision')
+    return remoteWrite(parsed.data.revision, () => {
+      const environment = remoteEnvironment(params.environment)
+      if (!environment) return refuse(404, 'Environment not found')
+      for (const host of environment.hosts) delete server.remotePasswords[host.id]
+      server.remote.environments = server.remote.environments.filter(item => item.id !== environment.id)
+    })
+  } },
+  'POST remote/environments/:environment/hosts': { body: true, answer: ({ params, body }) => {
+    const parsed = HostWriteSchema.safeParse(body)
+    if (!parsed.success || !parsed.data.password) return refuse(400, 'Invalid host or missing password')
+    const { revision, password, ...value } = parsed.data
+    return remoteWrite(revision, () => {
+      const environment = remoteEnvironment(params.environment)
+      if (!environment) return refuse(404, 'Environment not found')
+      const id = crypto.randomUUID()
+      environment.hosts.push({ id, ...value, auth: 'password', hasPassword: true, hostKeyFingerprint: null })
+      server.remotePasswords[id] = password
+    })
+  } },
+  'PUT remote/environments/:environment/hosts/:host': { body: true, answer: ({ params, body }) => {
+    const parsed = HostWriteSchema.safeParse(body)
+    if (!parsed.success) return refuse(400, 'Invalid host')
+    const { revision, password, ...value } = parsed.data
+    return remoteWrite(revision, () => {
+      const host = remoteHost(params.environment, params.host)
+      if (!host) return refuse(404, 'Host not found')
+      const changed = host.host !== value.host || host.port !== value.port
+      Object.assign(host, value, ...changed ? [{ hostKeyFingerprint: null }] : [])
+      if (password) server.remotePasswords[host.id] = password
+    })
+  } },
+  'DELETE remote/environments/:environment/hosts/:host': { body: true, answer: ({ params, body }) => {
+    const parsed = DeleteSchema.safeParse(body)
+    if (!parsed.success) return refuse(400, 'Invalid revision')
+    return remoteWrite(parsed.data.revision, () => {
+      const host = remoteHost(params.environment, params.host), environment = remoteEnvironment(params.environment)
+      if (!host || !environment) return refuse(404, 'Host not found')
+      environment.hosts = environment.hosts.filter(item => item.id !== host.id)
+      delete server.remotePasswords[host.id]
+    })
+  } },
+  'POST remote/environments/:environment/hosts/:host/probe': { body: true, answer: async ({ params, body }) => {
+    const parsed = ProbeSchema.safeParse(body)
+    if (!parsed.success) return refuse(400, 'Invalid revision')
+    if (parsed.data.revision !== server.remote.revision) return refuse(409, 'Inventory changed')
+    if (!remoteHost(params.environment, params.host)) return refuse(404, 'Host not found')
+    const probe = { token: crypto.randomUUID(), fingerprint: REMOTE_FINGERPRINT, expiresAt: new Date(Date.now() + 300_000).toISOString() }
+    server.remoteChallenges[probe.token] = { ...params, revision: parsed.data.revision, probe }
+    await server.remoteWaiting?.('probe', params.host)
+    return probe
+  } },
+  'POST remote/environments/:environment/hosts/:host/trust': { body: true, answer: ({ params, body }) => {
+    const parsed = TrustSchema.safeParse(body)
+    if (!parsed.success) return refuse(400, 'Invalid challenge')
+    return remoteWrite(parsed.data.revision, () => {
+      const challenge = server.remoteChallenges[parsed.data.token], host = remoteHost(params.environment, params.host)
+      if (!host) return refuse(404, 'Host not found')
+      if (!challenge || challenge.environment !== params.environment || challenge.host !== params.host
+        || challenge.revision !== parsed.data.revision || Date.parse(challenge.probe.expiresAt) <= Date.now()) return refuse(400, 'Invalid challenge')
+      host.hostKeyFingerprint = challenge.probe.fingerprint
+      delete server.remoteChallenges[parsed.data.token]
+    })
+  } },
+  'POST remote/environments/:environment/hosts/:host/test': { body: true, answer: async ({ params, body }) => {
+    const parsed = ProbeSchema.safeParse(body)
+    if (!parsed.success) return refuse(400, 'Invalid revision')
+    if (parsed.data.revision !== server.remote.revision) return refuse(409, 'Inventory changed')
+    const host = remoteHost(params.environment, params.host)
+    if (!host) return refuse(404, 'Host not found')
+    if (!host.hostKeyFingerprint) return refuse(400, 'Trust a fingerprint first')
+    const result = structuredClone(server.remoteTest)
+    await server.remoteWaiting?.('test', params.host)
+    return result
+  } },
+
   // Optimization behavior uses the real SQLite/runtime fixture, not this UI-only server.
   'GET optimization': { query: ['since', 'until', 'offset', 'limit'], answer: () => refuse(404, 'No optimization runtime') },
   'GET optimization/records': { query: ['since', 'until', 'offset', 'limit'], answer: () => refuse(404, 'No optimization runtime') },

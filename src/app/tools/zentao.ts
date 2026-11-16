@@ -2,7 +2,7 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { z } from 'zod'
-import { latestReport, liveTicket, type Ticket } from '../../core/index.ts'
+import { latestReport, liveTicket, waitsForPerson, type Ticket } from '../../core/index.ts'
 import { KV } from '../../kv.ts'
 import { packagePath } from '../../infra/paths.ts'
 import { ticketBranch } from '../../sources/change.ts'
@@ -46,9 +46,9 @@ const MergeRequest = GitlabMergeRequestSchema.extend({ merge_commit_sha: Sha.nul
 export function guardZentaoReport(host: ZentaoToolsHost, ticket: Ticket, report: { state: string; summary: string; human_action?: string | null }): string | undefined {
   const trigger = host.resources.store.triggers.get(ticket.origin.triggerId)
   if (trigger?.source !== 'zentao') return undefined
-  const previous = latestReport(ticket)
   if (report.state === 'dropped') throw new Error('ZenTao bugs must be notified and paused with state=blocked, not dropped or closed')
-  if ((previous?.state === 'blocked' || previous?.state === 'failed') && report.state !== 'blocked' && report.state !== 'failed') throw new Error('This bug is paused; only a manual ticket retry may resume it')
+  // Only the current Assignment's pause holds work: a retry starts a new Assignment, which lifts it (see `waitsForPerson`).
+  if (waitsForPerson(ticket) && report.state !== 'blocked' && report.state !== 'failed') throw new Error('This bug is paused; wait for a panel Retry or an authorized notification-topic resume')
   if (report.state === 'ready' && !host.repository.state.get(KV.zentao.workflow(ticket.id))?.resolved) throw new Error('Complete test deployment, verification and ZenTao resolution before reporting ready')
   if (report.state !== 'blocked' && report.state !== 'failed') return undefined
   const message = zentaoBlockedNotice(ticket, trigger, report.summary)
@@ -76,7 +76,7 @@ export function zentaoTools(host: ZentaoToolsHost, initial: Ticket): Tool[] {
       if (args.action === 'read') return { ...state.resolved ? { resolution_confirmed: true } : { bug: await client.bug(bugId) },
         workflow: state, test_api: config.testApi, release_helper: helper }
       const latest = latestReport(ticket)
-      if (latest?.state === 'blocked' || latest?.state === 'failed') throw new Error('This bug is paused; wait for a panel Retry or an authorized notification-topic resume')
+      if (waitsForPerson(ticket)) throw new Error(`This bug is paused${latest ? `: ${latest.summary}` : ''}; wait for a panel Retry or an authorized notification-topic resume`)
       const directory = ticket.execution?.directory
       if (!directory) throw new Error('The ticket has no prepared worktree')
       const commands = host.repository.commands.withSignal(signal)

@@ -37,7 +37,7 @@ export const KV = {
   /** Fingerprint of each successfully retained document, scoped to its Hindsight connection and repository. */
   memory: { retained: family<string>('memory-retained:') },
   /** First activation of the local optimization collector; not a claim of historical coverage. */
-  optimization: { startedAt: record<string>('optimization-started-at') },
+  optimization: { startedAt: record<string>('optimization-started-at'), exported: family<string>('optimization-exported:') },
   /** Schema 11 migration: legacy main-Session queues imported into the effect table. */
   queues: { relays: record<{ id: string; text: string }[]>('relay-queue'), unsubscribed: record<string[]>('subscription-results'),
     prompts: record<number | null>('prompt-notification'), settings: record<number | null>('settings-notification') },
@@ -59,9 +59,13 @@ export const KV = {
     thread: family<string, [thread: string]>('gitlab-thread:'),
     branch: family<string, [namespace: string]>('gitlab-branch:'),
     ci: family<{ fingerprint?: string; revision: number }, [namespace: string, target: string]>('gitlab-ci:') },
-  /** Ticket checkpoints; Feishu roots and immutable creation requests scoped to bug, bot application and recipient. */
+  /**
+   * Ticket checkpoints; Feishu roots and immutable creation requests scoped to bug, bot application and recipient.
+   * `feishuRoot` reverses a root message to its topic scope, so a reply needs one lookup instead of scanning the family.
+   */
   zentao: { workflow: family<ZentaoWorkflow>('zentao-workflow:'), feishuTopic: family<string>('zentao-feishu-topic:'),
-    feishuTopicStart: family<{ id: string; text: string }>('zentao-feishu-topic-start:') },
+    feishuTopicStart: family<{ id: string; text: string }>('zentao-feishu-topic-start:'),
+    feishuRoot: family<string>('zentao-feishu-root:') },
   /**
    * Feishu Source: known chats (`true` for direct messages); per-chat history cursor and active topics mapped from topic ID
    * to last-seen timestamp; and per-polled-thread seen message IDs and initialization flag.

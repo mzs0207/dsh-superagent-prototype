@@ -11,7 +11,7 @@ import { SourceRegistry } from '../src/sources/registry.ts'
 import { sourceContextOf } from '../src/app/source-context.ts'
 import { Engine, type Ticket } from '../src/core/index.ts'
 import { SettingsSchema } from '../src/policy.ts'
-import { Commands } from '../src/infra/commands.ts'
+import { CliError, Commands } from '../src/infra/commands.ts'
 import { testDeployment } from './fixtures/deployment.ts'
 import { KV } from '../src/kv.ts'
 import { guardZentaoReport, zentaoTools, type ZentaoToolsHost } from '../src/app/tools/zentao.ts'
@@ -119,6 +119,19 @@ describe('Zentao intake', () => {
     try {
       await pollZentao(ctx)
       expect(store.read.triggers({}).items.map(item => item.meta.bugId).sort()).toEqual([3, 4])
+    } finally { store.close() }
+  })
+  it('skips one unreadable bug without dropping the rest of the page or the poll', async () => {
+    // `steps: null` aborts a whole-array parse, which would otherwise stop every assigned bug of the product.
+    rows = [bug(1, { steps: null }), bug(2), bug(3, { title: null }), bug(4)]
+    const { store, ctx } = context()
+    const reports: { state: string; detail: string }[] = []
+    const report = ctx.report
+    ctx.report = (entry, value) => { reports.push(value as { state: string; detail: string }); report(entry, value) }
+    try {
+      await pollZentao(ctx)
+      expect(store.read.triggers({}).items.map(item => item.meta.bugId).sort()).toEqual([2, 4])
+      expect(reports.at(-1)).toMatchObject({ state: 'ready', detail: expect.stringContaining('2 unreadable bugs skipped') })
     } finally { store.close() }
   })
   it('does not create new work for its own comments, edits or a process restart', async () => {
@@ -384,6 +397,32 @@ describe('Zentao workflow boundaries', () => {
       expect(comments).toEqual([])
     } finally { await h.effects.drain(); sent.mockRestore(); h.store.close() }
   })
+  it('retires a recalled topic instead of retrying it forever, so the next notice opens a fresh one', async () => {
+    const h = await worker()
+    const recalled = new CliError('message is recalled', 230011)
+    const sent = vi.spyOn(h.ctx.commands, 'lark').mockResolvedValueOnce({ message_id: 'om_root' })
+      .mockRejectedValueOnce(recalled).mockResolvedValue({ message_id: 'om_root_new' })
+    try {
+      notifications(h)
+      const first = guardZentaoReport(h.host, h.ticket, { state: 'blocked', summary: 'First notice' })!
+      h.effects.start(); await h.outbox.sent()
+      expect(h.store.replyStatus(first)).toBe('sent')
+      h.outbox.send({ id: 'followup', channel: h.ticket.channels[0]!, kind: 'notice', text: 'More evidence' })
+      await h.outbox.sent()
+      // A recalled root never revives: the receipt settles as dropped (channelGone) instead of retrying to the failure limit.
+      expect(h.store.replyStatus('followup')).toBe('dropped')
+      expect(h.store.receipts.get('followup')).toMatchObject({ dropped: { reason: 'channelGone' } })
+      // Only the root creation and the one rejected reply: a recalled root is not retried.
+      expect(sent).toHaveBeenCalledTimes(2)
+      // The dead topic was forgotten, so the next notice starts a new root instead of hitting the recalled one again.
+      h.outbox.send({ id: 'after-recall', channel: h.ticket.channels[0]!, kind: 'notice', text: 'Fresh evidence' })
+      await h.outbox.sent()
+      expect(h.store.replyStatus('after-recall')).toBe('sent')
+      expect(sent.mock.calls[2]![0]).toEqual(['im', '+messages-send', '--user-id', 'ou_operator', '--text',
+        expect.stringContaining('Fresh evidence'), '--idempotency-key', 'after-recall'])
+      expect(comments).toEqual([])
+    } finally { await h.effects.drain(); sent.mockRestore(); h.store.close() }
+  })
   it('retries a failed topic reply in the same topic without starting another root', async () => {
     const h = await worker()
     const sent = vi.spyOn(h.ctx.commands, 'lark').mockResolvedValueOnce({ message_id: 'om_root' })
@@ -447,6 +486,29 @@ describe('Zentao workflow boundaries', () => {
       expect(() => guardZentaoReport(h.host, h.ticket, { state: 'dropped', summary: 'not a bug' })).toThrow()
       expect(h.store.tickets.get(h.ticket.id)?.ended).toBeUndefined()
     } finally { h.store.close() }
+  })
+  it('lets a retried bug report again, and stops warning and re-notifying with its old pause', async () => {
+    const h = await worker()
+    const sent = vi.spyOn(h.ctx.commands, 'lark').mockResolvedValue({ message_id: 'om_first' })
+    try {
+      notifications(h)
+      const report = { state: 'blocked' as const, summary: '缺少复现账号。' }
+      const id = guardZentaoReport(h.host, h.ticket, report)!
+      h.engine.report(h.ticket.id, report)
+      h.effects.start(); await h.outbox.sent()
+      expect(h.store.replyStatus(id)).toBe('sent')
+      // Paused work cannot quietly continue.
+      expect(() => guardZentaoReport(h.host, h.store.tickets.get(h.ticket.id)!, { state: 'progress', summary: '继续' })).toThrow(/paused/i)
+      // A retry starts a new Assignment, which lifts the pause the previous one reported.
+      h.engine.retryTicket(h.ticket.id)
+      const retried = h.store.tickets.get(h.ticket.id)!
+      expect(retried.assignments.map(item => item.state)).toEqual(['ended', 'pending'])
+      expect(() => guardZentaoReport(h.host, retried, { state: 'progress', summary: '重新核对中' })).not.toThrow()
+      // Polling must neither re-warn about the stale pause nor send a duplicate notice for the retried assignment.
+      const before = sent.mock.calls.length
+      await pollZentao(h.ctx); await h.outbox.sent()
+      expect(sent).toHaveBeenCalledTimes(before)
+    } finally { await h.effects.drain(); sent.mockRestore(); h.store.close() }
   })
   it('queues one evidence note and keeps a blocked bug paused across poll cycles and reactivation', async () => {
     const h = await worker()

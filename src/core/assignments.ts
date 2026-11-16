@@ -85,8 +85,10 @@ export class Assignments extends EnginePart {
     const running = ticket && runningAssignment(ticket)
     if (!ticket || !running) return
     const report = running.report
-    // Manual pauses are stronger than recovery timestamps, including a report in the delivery's millisecond.
-    if (ticket.resume === 'manual' && (report?.state === 'blocked' || report?.state === 'failed')) return
+    // Manual pauses are stronger than recovery timestamps, including a report in the delivery's millisecond. An Input
+    // delivered after that report is a person waking the ticket again, so it restarts like any other interrupted work.
+    if (ticket.resume === 'manual' && (report?.state === 'blocked' || report?.state === 'failed')
+      && !(running.deliveredAt && running.deliveredAt > report.at)) return
     const busy = !!running.deliveredAt && !!report && running.deliveredAt >= report.at
     const settled = !!report && ['waiting', 'ready', 'blocked', 'failed'].includes(report.state) && !busy
     if (!settled) this.tickets.restart(ticket, running, 'hostRestarted', RECOVERY_NOTE)

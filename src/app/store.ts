@@ -43,6 +43,12 @@ const SETS: Record<string, Record<string, string>> = {
     AND value ->> '$.ticketId' IS NOT NULL THEN (value ->> '$.ticketId') || ' ' || (value ->> '$.channel.thread') END)` },
 }
 export { SCHEMA_VERSION }
+/** SQLite errors that leave no transaction to unwind, so the savepoint named in an `atomic` block no longer exists. */
+const ended = (error: unknown): boolean => {
+  const code = (error as { code?: unknown } | null)?.code
+  return code === 'SQLITE_FULL' || code === 'SQLITE_IOERR' || code === 'SQLITE_CORRUPT' || code === 'SQLITE_NOMEM'
+    || /no such savepoint|transaction within a transaction|no transaction is active/i.test(String((error as Error | null)?.message ?? ''))
+}
 /**
  * SQLite backing store implementing domain `Repositories`, view read queries, versioned settings, outbox receipts, and key-value state.
  * The Runtime opens it after locking the state directory and automatically migrates supported older schemas on startup.
@@ -138,14 +144,21 @@ export class Store implements Repositories {
    * Post-commit callbacks run only after the outermost transaction commits, and callback errors are reported without failing the committed transaction.
    */
   atomic<T>(operation: () => T): T {
-    const level = this.depth++
-    const name = `orchestrator_atomic_${level}`
+    const level = this.depth, name = `orchestrator_atomic_${level}`
+    // Take the savepoint before counting the level, so a failure here cannot leave `depth` above the real nesting.
+    try { this.db.exec(`SAVEPOINT ${name}`) }
+    catch (error) { this.committed[level] = []; throw error }
+    this.depth++
     this.committed[level] = []
-    this.db.exec(`SAVEPOINT ${name}`)
     let value: T
     try { value = operation(); this.db.exec(`RELEASE ${name}`) }
-    catch (error) { this.db.exec(`ROLLBACK TO ${name}`); this.db.exec(`RELEASE ${name}`); throw error }
-    finally { this.depth-- }
+    catch (error) {
+      // A transaction-fatal error (disk full, corruption, RAISE(ROLLBACK)) already ended the transaction, so the
+      // savepoint is gone: unwinding it would replace the real cause with "no such savepoint".
+      if (ended(error)) { this.db.exec('ROLLBACK'); this.depth--; this.committed[level] = []; throw error }
+      this.db.exec(`ROLLBACK TO ${name}`); this.db.exec(`RELEASE ${name}`); throw error
+    }
+    finally { if (this.depth > level) this.depth-- }
     const actions = this.committed.splice(level)[0]!
     if (level) this.committed[level - 1]!.push(...actions)
     else for (const action of actions) { try { action() } catch (error) { this.report(error) } }

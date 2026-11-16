@@ -3,11 +3,12 @@ import type { Context } from '@deepseek-ai/cordis'
 import { readFile } from 'node:fs/promises'
 import { KV } from '../kv.ts'
 import { z } from 'zod'
-import { key, latestAssignment, latestReport, type OutboundMessage, type Ticket, type Trigger } from '../core/index.ts'
+import { key, latestAssignment, latestReport, waitsForPerson, type Assignment, type OutboundMessage, type Ticket, type Trigger } from '../core/index.ts'
 import { ZentaoClient, ZentaoConnectionSchema, ZentaoScopeError, type ZentaoBug } from './zentao-client.ts'
 import type { SourceKind } from './kind.ts'
 import { health, sourceContext, type SourceContext } from './host.ts'
 import { pause } from './poll.ts'
+import type { Tally } from '../infra/commands.ts'
 
 export const ZentaoConfigSchema = ZentaoConnectionSchema.extend({
   repository: z.string().trim().default(''),
@@ -30,6 +31,14 @@ export function zentaoBlockedNotice(ticket: Ticket, trigger: Trigger, summary: s
   if (!trigger.channel || trigger.source !== 'zentao') throw new Error('A ZenTao bug channel is required')
   return { id: key('zentao-blocked', ticket.id, latestAssignment(ticket)?.id ?? '', summary), channel: trigger.channel,
     ticketId: ticket.id, kind: 'notice', text: `自动处理已暂停，本单不会因轮询、普通评论或服务重启自动重试。\n\n${summary}\n\n请在 Superagent 工单面板手动重试。若本通知通过飞书发送，可在原话题内补充信息；已授权的通知收件人单独回复“继续”也可恢复原任务。` }
+}
+/**
+ * The pause the ticket still waits under, or undefined once it does not: a retry starts a new Assignment, whose missing
+ * report lifts a pause the previous one reported (see `waitsForPerson`). Polling and the panel both use this so a retried
+ * ticket is neither re-notified with its stale pause nor warned about a worker that is running again.
+ */
+function heldReport(ticket: Ticket): Assignment['report'] {
+  return waitsForPerson(ticket) ? latestAssignment(ticket)?.report : undefined
 }
 export const zentaoKind: SourceKind<ZentaoConfig> = {
   kind: 'zentao', defaultEnabled: false,
@@ -99,7 +108,7 @@ export async function pollZentao(ctx: SourceContext, signal?: AbortSignal): Prom
   for (const ticket of ctx.tickets.open()) {
     const trigger = ctx.triggers.get(ticket.origin.triggerId)
     if (trigger?.source !== 'zentao' || trigger.meta.namespace !== zentaoNamespace(config)) continue
-    let report = latestReport(ticket)
+    let report = heldReport(ticket)
     const workflow = ctx.state.get(KV.zentao.workflow(ticket.id))
     if (workflow?.receipt && !workflow.resolved) {
       let failure: string | undefined, failureAt = ''
@@ -112,7 +121,7 @@ export async function pollZentao(ctx: SourceContext, signal?: AbortSignal): Prom
         ctx.atomic(() => {
           if (report?.state !== 'blocked' && report?.state !== 'failed') {
             ctx.tickets.block(ticket.id, `测试部署已暂停：${failure}`)
-            report = latestReport(ctx.tickets.get(ticket.id)!)
+            report = heldReport(ctx.tickets.get(ticket.id)!)
           }
           if (report) ctx.notify(zentaoBlockedNotice(ticket, trigger, report.summary))
           ctx.state.set(KV.zentao.workflow(ticket.id), { ...workflow, failureSeen: signature! })
@@ -122,7 +131,8 @@ export async function pollZentao(ctx: SourceContext, signal?: AbortSignal): Prom
     if (report && (report.state === 'blocked' || report.state === 'failed')) ctx.notify(zentaoBlockedNotice(ticket, trigger, report.summary))
   }
   const client = new ZentaoClient(config, signal)
-  const bugs = await client.bugs(); let accepted = 0
+  const tally: Tally = { skipped: 0 }
+  const bugs = await client.bugs(tally); let accepted = 0
   for (const bug of bugs) {
     if (signal?.aborted || !ctx.config('zentao')) break
     if (bug.product !== config.product || bug.assignedTo !== config.account || bug.status !== 'active' || bug.deleted) continue
@@ -131,15 +141,17 @@ export async function pollZentao(ctx: SourceContext, signal?: AbortSignal): Prom
     const existing = ctx.threads.get(`zentao:${trigger.threads[0]!.id}`)
     // A new activation cannot wake work that explicitly waits for manual retry.
     if (existing?.subscriptions.some(id => {
-      const ticket = ctx.tickets.get(id), report = ticket && latestReport(ticket)
-      return ticket && !ticket.ended && (report?.state === 'blocked' || report?.state === 'failed')
+      const ticket = ctx.tickets.get(id)
+      return ticket && !ticket.ended && !!heldReport(ticket)
     })) continue
     const fresh = await client.bug(bug.id)
     if (fresh.status !== 'active' || fresh.activatedCount !== bug.activatedCount) continue
     await ctx.receive(zentaoTrigger(config, fresh)); accepted++
     ctx.threads.describe(`zentao:${trigger.threads[0]!.id}`, { label: `禅道 #${bug.id} ${bug.title}`, url: trigger.url })
   }
-  ctx.report('zentao', { state: 'ready', detail: `ZenTao: ${accepted} new assigned bugs; next poll ${config.pollSeconds}s`, at: new Date().toISOString() })
+  // A skipped bug is reported, not fatal: the operator can fix it in ZenTao while intake continues.
+  const skipped = tally.skipped ? `; ${tally.skipped} unreadable bugs skipped` : ''
+  ctx.report('zentao', { state: 'ready', detail: `ZenTao: ${accepted} new assigned bugs${skipped}; next poll ${config.pollSeconds}s`, at: new Date().toISOString() })
   return config.pollSeconds
 }
 async function watch(ctx: SourceContext, signal: AbortSignal): Promise<void> {

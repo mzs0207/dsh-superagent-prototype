@@ -16,6 +16,15 @@ it('stops a worker through its ticket, including background work and the mandate
   expect(h.agents.get(sessionId)?.status).toBe('idle')
 })
 
+it('stops a cold listed conversation without reporting it missing', async () => {
+  // A listed Session need not be attached: `cancel` only knows live Agents, so a cold one has no turn to stop.
+  Object.assign(h.controller, { list: async () => ({ items: [{ sessionId: 'cold-desktop', running: false, updatedAt: 10 }] }) })
+  expect((await h.api('GET', 'conversations?offset=0')).body).toMatchObject({ items: [{ id: 'cold-desktop', kind: 'conversation' }] })
+  const response = await h.api('POST', 'conversations/cold-desktop/stop', {})
+  expect(response.status).toBe(200)
+  expect(response.body).toEqual({ accepted: true, taskStopped: false })
+})
+
 it('lists desktop conversations with roles without leaking paths or arbitrary projections', async () => {
   Object.assign(h.controller, { list: async () => ({ items: [
     { sessionId: h.runtime.masterId, running: true, updatedAt: 20, projections: { values: { title: '调度', secret: 'private-token' } }, cwd: '/private' },

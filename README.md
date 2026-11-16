@@ -10,6 +10,8 @@ Repository hosting defaults to **Automatic**: configure GitHub **or** GitLab, no
 
 Optional [ZenTao intake](docs/006-deployment.md#zentao-assigned-bugs-optional) handles assigned bugs through reproduction, verified repair, a `develop` MR merge, fix-only cherry-pick to `test`, Jenkins deployment and live verification. Blocked or nonexistent bugs receive an evidence note and remain paused until an operator retries. Other Sources retain their existing merge policy.
 
+Optional [multi-environment SSH / Docker Compose diagnostics](docs/010-remote-ops.md): group Linux servers under arbitrary environments (including development V2), configure multiple Compose projects, and collect bounded status/log/resource evidence per server with a native read-only DSH plugin. Includes an **Environments & hosts** UI with password-only SSH, encrypted credential storage, explicit host-fingerprint trust and connection tests; legacy inventories retain OpenSSH config/key/agent support. Complements existing interactive SSH plugins without switching the current workspace.
+
 Optional [Android tasks and conversations](docs/009-mobile.md): a small WebView app with task lists, progress/results and shared DSH conversations on a trusted private network. A separate password-protected HTTP gateway exposes task reads and allowlisted conversation operations; ordinary, main and task-worker sessions support text input and stopping. No separate accounts, push notifications or tunnels.
 
 It is also a way of working with an agent: **take as little human attention as possible, and give as much value as possible.** An agent that can act for a whole team can also waste a whole team's attention, so it acts only when asked or when a rule the team wrote allows it, and speaks only when someone must act or can use a result. [docs/000-philosophy.md](docs/000-philosophy.md) explains the principle and what it asks of the operator.
@@ -36,6 +38,7 @@ Read the numbered documents in order; each builds only on the ones before it.
 - [007 Architecture](docs/007-architecture.md)
 - [008 Cookbook](docs/008-cookbook.md): adding a Source
 - [009 Mobile tasks and conversations](docs/009-mobile.md): Android APK, private HTTP gateway and password setup
+- [010 Remote diagnostics](docs/010-remote-ops.md): environment/server/Compose inventory, SSH setup, fixed read-only tools and production boundaries
 
 ## Development
 

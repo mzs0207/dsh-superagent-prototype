@@ -28,8 +28,11 @@ const presetOf = (rows: readonly Row[], id: string) => rows.map(row => row.confi
 
 it('defines the worker preset Executor Sessions run under, with a shell that moves long commands to the background', async () => {
   const rows = await patched()
-  expect(rows.map(row => row.id)).toEqual(['dsh-superagent', 'dsh-superagent-github', 'dsh-superagent-gitlab', 'dsh-superagent-zentao',
+  expect(rows.map(row => row.id)).toEqual(['dsh-superagent-remote-ops', 'dsh-superagent', 'dsh-superagent-github', 'dsh-superagent-gitlab', 'dsh-superagent-zentao',
     'dsh-superagent-feishu', 'dsh-superagent-worker-preset', 'dsh-superagent-router-preset'])
+  expect(rows[0]).toMatchObject({ id: 'dsh-superagent-remote-ops', name: 'dsh-superagent/remote-ops' })
+  // Diagnostics must register before managed Sessions calculate their inherited allowlist.
+  expect(rows[0]!.config).toBeUndefined()
   const preset = presetOf(rows, WORKER_PRESET)
   expect(preset.id).toBe(WORKER_PRESET)
   const plugins = flat(preset.plugins)

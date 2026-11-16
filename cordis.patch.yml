@@ -2,6 +2,10 @@
 # profile supplies the `dsh-superagent` entry's stateDir (see docs/006-deployment.md and examples/profile.cordis.patch.yml); the plugin
 # refuses to start without stateDir.
 - insert:
+    # Register before managed Sessions compute their inherited tool allowlist.
+    # No SSH runs without an explicit check/diagnostic request against configured hosts. Diagnostic actions are read-only.
+    - id: dsh-superagent-remote-ops
+      name: dsh-superagent/remote-ops
     - id: dsh-superagent
       name: dsh-superagent
     - id: dsh-superagent-github

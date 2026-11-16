@@ -3,6 +3,7 @@ import { z } from 'zod'
 import { key, type OutboundMessage, type Outbox as OutboxPort, type ReplyStatus } from '../core/index.ts'
 import type { Commands } from '../infra/commands.ts'
 import { checkedImText } from '../infra/text.ts'
+import { gone } from '../sources/feishu-channel.ts'
 import type { SourceRegistry } from '../sources/registry.ts'
 import type { FeishuConfig } from '../sources/feishu.ts'
 import { FAILURES_BEFORE_ERROR, Later, type Effects } from './effects.ts'
@@ -12,7 +13,7 @@ import { KV } from '../kv.ts'
 const FeishuSentMessage = z.object({ message_id: z.string().min(1) })
 
 export interface OutboxHost {
-  readonly store: Pick<Store, 'atomic' | 'receipts' | 'get' | 'set'>
+  readonly store: Pick<Store, 'atomic' | 'receipts' | 'get' | 'set' | 'delete'>
   readonly effects: Pick<Effects, 'enqueue' | 'cancel' | 'handle' | 'idle'>
   readonly sources: Pick<SourceRegistry, 'instance' | 'channelAllowed' | 'send'>
   readonly commands: Commands
@@ -51,10 +52,13 @@ export class Outbox implements OutboxPort {
     if (!sources.channelAllowed(receipt.channel)) { store.receipts.settle(receipt, 'channelIgnored'); return }
     // Choose at delivery time so already queued ZenTao notes also respect the operator's notification setting.
     const feishu = receipt.channel.source === 'zentao' ? sources.instance<FeishuConfig>('feishu') : undefined
-    if (feishu?.enabled && feishu.config.notificationOpenId) {
+    // A notice for a topic needs the bot that receives the reply; without an app id no root can be matched again, so keep the comment.
+    const appId = commands.deployment.feishu?.appId
+    if (feishu?.enabled && feishu.config.notificationOpenId && appId) {
       const { bugId, url } = receipt.channel.address
+      // Notices carry the worker's full evidence to the fixed operator; they are not IM replies and keep their text.
       const text = `禅道 Bug #${bugId}\n${url}\n\n${receipt.text}`
-      const topicScope = key(receipt.channel.thread, commands.deployment.feishu?.appId ?? '', feishu.config.notificationOpenId)
+      const topicScope = key(receipt.channel.thread, appId, feishu.config.notificationOpenId)
       const topicKey = KV.zentao.feishuTopic(topicScope), startKey = KV.zentao.feishuTopicStart(topicScope)
       let root = store.get(topicKey), start = store.get(startKey)
       if (!root) {
@@ -65,13 +69,26 @@ export class Outbox implements OutboxPort {
         const confirmed = FeishuSentMessage.parse(sent).message_id, first = start.id === receipt.id
         store.atomic(() => {
           store.set(topicKey, confirmed)
+          // Reverse the root to its scope so a follow-up reply is one lookup, not a scan of the topic family.
+          store.set(KV.zentao.feishuRoot(confirmed), topicScope)
           if (first) store.receipts.settle(receipt, 'sent')
         })
         if (first) return
         root = confirmed
       }
-      if (start?.id !== receipt.id) await commands.lark(['im', '+messages-reply', '--message-id', root, '--text', text,
-        '--reply-in-thread', '--idempotency-key', receipt.id])
+      // The immutable creation request stays recorded: it is what tells this receipt apart from later notices of the topic.
+      try {
+        if (start?.id !== receipt.id) await commands.lark(['im', '+messages-reply', '--message-id', root, '--text', text,
+          '--reply-in-thread', '--idempotency-key', receipt.id])
+      } catch (error) {
+        // A recalled root never revives: forget it so the next notice opens a fresh topic instead of retrying forever.
+        if (!gone(error)) throw error
+        store.atomic(() => {
+          store.delete(topicKey); store.delete(startKey); store.delete(KV.zentao.feishuRoot(root))
+          store.receipts.settle(receipt, 'channelGone')
+        })
+        return
+      }
       store.receipts.settle(receipt, 'sent')
       return
     }

@@ -144,6 +144,24 @@ it('spells every kv key in KV alone, so each record is named by its entry there'
   expect(spelled).toEqual([])
 })
 
+it('keeps its nesting depth after a savepoint cannot be taken, so later callbacks still run', () => {
+  const store = new Store(join(directory, 'orchestrator.sqlite'))
+  const ran: string[] = []
+  // A failure before the savepoint exists must not leave the depth raised, which would strand every later afterCommit.
+  const exec = store.db.exec.bind(store.db)
+  let block = true
+  store.db.exec = ((sql: string) => {
+    if (block && sql.startsWith('SAVEPOINT')) { block = false; throw new Error('no such savepoint') }
+    return exec(sql)
+  }) as typeof store.db.exec
+  expect(() => store.atomic(() => { store.set('skipped', 1) })).toThrow('no such savepoint')
+  store.afterCommit(() => { ran.push('after') })
+  expect(ran).toEqual(['after'])
+  store.set('kept', 1)
+  expect(store.get('kept')).toBe(1)
+  store.close()
+})
+
 it('runs what waits for a commit once the outermost transaction commits, and never what a rolled back one queued', () => {
   const store = new Store(join(directory, 'orchestrator.sqlite'))
   const ran: string[] = []

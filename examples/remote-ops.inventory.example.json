@@ -1,0 +1,92 @@
+{
+  "version": 1,
+  "environments": [
+    {
+      "id": "dev",
+      "label": "开发环境",
+      "aliases": ["开发"],
+      "servers": [
+        {
+          "id": "dev-1",
+          "host": "community-dev",
+          "projects": [
+            {
+              "id": "community",
+              "directory": "/srv/community",
+              "files": ["compose.yml", "compose.dev.yml"]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "test",
+      "label": "测试环境",
+      "aliases": ["测试"],
+      "servers": [
+        {
+          "id": "test-1",
+          "host": "community-test",
+          "projects": [
+            {
+              "id": "community",
+              "directory": "/srv/community",
+              "files": ["docker-compose-test.yml"]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "prod",
+      "label": "生产环境",
+      "aliases": ["生产"],
+      "production": true,
+      "servers": [
+        {
+          "id": "prod-1",
+          "host": "community-prod-1",
+          "projects": [
+            {
+              "id": "community",
+              "directory": "/opt/community",
+              "files": ["docker-compose-prod.yml"],
+              "projectName": "community"
+            }
+          ]
+        },
+        {
+          "id": "prod-2",
+          "host": "community-prod-2",
+          "projects": [
+            {
+              "id": "community",
+              "directory": "/opt/community",
+              "files": ["docker-compose-prod.yml"],
+              "projectName": "community"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "dev-v2",
+      "label": "开发环境V2",
+      "aliases": ["开发V2", "dev2"],
+      "servers": [
+        {
+          "id": "dev-v2-1",
+          "host": "community-dev-v2",
+          "projects": [
+            {
+              "id": "community",
+              "directory": "/srv/community-v2",
+              "files": ["compose.yml"],
+              "profiles": ["backend"]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

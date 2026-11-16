@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises'
 import { request as httpRequest } from 'node:http'
 import { request as httpsRequest } from 'node:https'
 import { z } from 'zod'
+import { validItems, type Tally } from '../infra/commands.ts'
 
 export const ZentaoConnectionSchema = z.object({
   baseUrl: z.string().trim().default('').transform(value => value.replace(/\/(?:admin\.html)?$/, '')).refine(value => {
@@ -73,14 +74,21 @@ export class ZentaoClient {
     }
     return this.json(new URL(`${this.config.baseUrl}/api.php/v1/${path}`), body === undefined ? undefined : JSON.stringify(body), { Token: this.token, 'Content-Type': 'application/json' })
   }
-  async bugs(): Promise<ZentaoBug[]> {
+  /**
+   * Reads every unclosed bug of the product. One malformed item is skipped and counted in `tally` rather than aborting the
+   * page, which would otherwise stop all assigned-bug intake until that bug is fixed in ZenTao.
+   */
+  async bugs(tally?: Tally): Promise<ZentaoBug[]> {
     const result: ZentaoBug[] = [], seen = new Set<number>()
     for (let page = 1; page <= 1000; page++) {
-      const data = z.object({ page: z.coerce.number(), total: z.coerce.number().nonnegative(), limit: z.coerce.number().positive(), bugs: z.array(ZentaoBugSchema) })
+      const data = z.object({ page: z.coerce.number(), total: z.coerce.number().nonnegative(), limit: z.coerce.number().positive(),
+        bugs: z.array(z.unknown()) })
         .parse(await this.api(`products/${this.config.product}/bugs?status=unclosed&limit=100&page=${page}`))
-      if (data.page !== page || data.bugs.some(bug => seen.has(bug.id))) throw new Error('ZenTao pagination did not advance')
-      for (const bug of data.bugs) { seen.add(bug.id); result.push(bug) }
-      if (result.length >= data.total) return result
+      const bugs = validItems(ZentaoBugSchema, data.bugs, tally)
+      if (data.page !== page || bugs.some(bug => seen.has(bug.id))) throw new Error('ZenTao pagination did not advance')
+      for (const bug of bugs) { seen.add(bug.id); result.push(bug) }
+      // Counted against the raw page length so skipped items cannot stall pagination by keeping the total unreachable.
+      if (result.length >= data.total || page * data.limit >= data.total) return result
       if (!data.bugs.length) throw new Error('ZenTao pagination ended before total')
     }
     throw new Error('ZenTao pagination exceeded 1000 pages')

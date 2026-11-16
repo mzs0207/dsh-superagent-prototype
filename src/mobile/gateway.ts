@@ -123,6 +123,8 @@ function authorized(req: IncomingMessage, token: Buffer): boolean {
 function send(res: ServerResponse, status: number, value: unknown) {
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(value))
 }
+/** Failed logins per client address, with the earliest retry time; bounded so a spoofed flood cannot grow memory. */
+const ATTEMPTS_LIMIT = 1024, THROTTLE_AFTER = 5, THROTTLE_STEP_MS = 5_000, THROTTLE_MAX_MS = 300_000
 /** Start only on explicit invocation; shutdown closes in-flight reads and the dedicated listener. */
 export async function startGateway(options: GatewayOptions) {
   const upstream = loopbackOrigin(options.upstream)
@@ -134,11 +136,27 @@ export async function startGateway(options: GatewayOptions) {
   const identity = { service: 'superagent-viewer', version: 1,
     id: createHash('sha256').update(options.password.salt).digest('hex'), name: hostname().slice(0, 80) }
   let origin = '', activeLogins = 0
+  /** Addresses that failed a login recently, to a limit an attacker cannot grow the map past. */
+  const attempts = new Map<string, { count: number; until: number }>()
+  const lockout = (client: string): number => {
+    const entry = attempts.get(client)
+    if (!entry || entry.until <= Date.now()) return 0
+    return entry.until - Date.now()
+  }
+  const failed = (client: string): void => {
+    const entry = attempts.get(client), count = (entry?.count ?? 0) + 1
+    if (attempts.size >= ATTEMPTS_LIMIT && !attempts.has(client)) return
+    // The first `THROTTLE_AFTER` attempts only count; every later one delays the next try, up to the cap.
+    const delay = count <= THROTTLE_AFTER ? 0 : Math.min(THROTTLE_MAX_MS, THROTTLE_STEP_MS * 2 ** Math.min(count - THROTTLE_AFTER, 6))
+    attempts.set(client, { count, until: Date.now() + delay })
+  }
   const server = createServer(async (req, res) => {
     res.setHeader('cache-control', 'no-store')
     res.setHeader('x-content-type-options', 'nosniff')
     res.setHeader('referrer-policy', 'no-referrer')
     res.setHeader('content-security-policy', "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'")
+    // Before the listener's address is known, `origin` is empty and no request can be proven same-origin.
+    if (!origin) return send(res, 503, { error: '正在启动，请稍后重试' })
     if (req.headers.host !== new URL(origin).host || (req.headers.origin !== undefined && req.headers.origin !== origin)
       || req.headers['sec-fetch-site'] === 'cross-site') return send(res, 403, { error: '拒绝跨来源访问' })
     let url: URL
@@ -148,6 +166,9 @@ export async function startGateway(options: GatewayOptions) {
     if (req.method === 'POST' && url.pathname === '/login' && !url.search) {
       if (req.headers['content-type'] !== 'application/x-www-form-urlencoded') return send(res, 415, { error: '无效的登录请求' })
       if (activeLogins >= 4) return send(res, 429, { error: '正在处理登录，请稍后重试' })
+      // A concurrency cap alone lets a serial attacker guess at scrypt speed; failed attempts back off per client.
+      const client = req.socket.remoteAddress ?? 'unknown', wait = lockout(client)
+      if (wait) { res.setHeader('retry-after', String(Math.ceil(wait / 1000))); return send(res, 429, { error: '登录失败次数过多，请稍后重试' }) }
       activeLogins++
       try {
         let body = '', bytes = 0
@@ -157,9 +178,10 @@ export async function startGateway(options: GatewayOptions) {
           body += chunk.toString()
         }
         const password = new URLSearchParams(body).get('password') ?? ''
-        if (password.length > 256) return send(res, 401, { error: '密码错误' })
+        if (password.length > 256) { failed(client); return send(res, 401, { error: '密码错误' }) }
         const actual = await derive(password, options.password.salt, 32) as Buffer
-        if (!timingSafeEqual(actual, expectedPassword)) return send(res, 401, { error: '密码错误' })
+        if (!timingSafeEqual(actual, expectedPassword)) { failed(client); return send(res, 401, { error: '密码错误' }) }
+        attempts.delete(client)
         res.setHeader('set-cookie', `${cookieName}=${token.toString()}; Path=/; HttpOnly; SameSite=Strict; Max-Age=2592000`)
         return send(res, 200, { authenticated: true })
       } catch { if (!res.destroyed) send(res, 400, { error: '登录失败，请重试' }) }

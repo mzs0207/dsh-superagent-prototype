@@ -108,14 +108,19 @@ export class Conversations {
     this.submitting.set(key, send)
     try { return await send } finally { this.submitting.delete(key) }
   }
-  stop(id: string) {
-    sessionId(id)
+  /**
+   * Stops a live worker's ticket, or cancels the active turn of any other Session. A listed Session need not be loaded:
+   * `cancel` only knows attached Agents, so a cold one has no running turn to stop and is not an error.
+   */
+  async stop(id: string) {
+    const target = sessionId(id)
     const ticketId = ticketOfSession(id), ticket = ticketId ? this.host.store.tickets.get(ticketId) : undefined
     if (ticket && liveTicket(ticket)) {
       this.host.engine.stopTicket(ticket.id, 'Stopped from mobile conversation')
-      return { accepted: true as const, taskStopped: true }
+      return { accepted: true as const, taskStopped: true as const }
     }
-    return { ...this.ctx.sessionController.cancel({ sessionId: sessionId(id) }), taskStopped: false }
+    if (!this.ctx.agents.get(target)) return { accepted: true as const, taskStopped: false as const }
+    return { ...this.ctx.sessionController.cancel({ sessionId: target }), taskStopped: false as const }
   }
   /** Follow the canonical DSH journal; disconnect removes listeners and abandons only the read, never the agent turn. */
   async stream(id: string, res: ServerResponse, lifetime: AbortSignal) {
