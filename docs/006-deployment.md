@@ -463,6 +463,6 @@ Setup problems appear on the overview with a link to the fix, in the panel's lan
 | `… timed out after 90 s`, `… was stopped by …`, `… exited with code …` or `… could not run: …` | A CLI failed without printing why; run the named program by hand as the operator's user to see its own message |
 | The panel says dsh-superagent is not answering | It is restarting, or did not start because of its configuration; the DeepSeek Harness log names the cause |
 | `dsh-superagent configuration has keys it does not use` (log) | Remove the named keys; the message says where each value lives now |
-| The log says the plugin is incompatible with the running dsh | Install a DeepSeek Harness version within the `engines.dsh` range |
+| The log says the plugin is incompatible with the running dsh | Install the pinned DeepSeek Harness CLI version from the Install section into the prefix owning `command -v dsh`; the current npm global prefix may differ. Check `dsh --version`, update any incompatible profile plugins, then restart the existing profile. Do not loosen `engines.dsh`, grant a version exemption, or recreate the profile |
 | The panel shows "Failed to load plugins" after a DeepSeek Harness upgrade | Restart the running instance |
 | Nothing happens after a mention | Check that the author is on the Source's allowed list, the Source is on, and processing is not paused. On GitHub, a mention added by editing an Issue's body is not received; mention the agent in a comment |
