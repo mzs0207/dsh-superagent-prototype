@@ -2,8 +2,8 @@
 """Manage a local dsh-superagent service (one DSH profile, default `superagent`) without affecting other tmux sessions.
 
 `status`, `start`, and `restart` exit 0 while the service runs normally; 1 when it is stopped, duplicated, unreachable, or
-reporting a runtime error, which `restart` may fix; 2 when it runs while a component such as a Source reports an error;
-and 3 when it runs and waits for setup. A restart fixes neither 2 nor 3: they need a person.
+reporting a runtime error; 2 when it runs while a component such as a Source reports an error;
+and 3 when it runs and waits for setup. `recover` only repairs case 1, and always respects an intentional stop.
 """
 
 import argparse
@@ -127,6 +127,10 @@ def outcome(pids, current):
 def status(args):
     pids = processes(args.profile)
     current = state(args.url) if pids else None
+    return report_status(args, pids, current)
+
+
+def report_status(args, pids, current):
     print(json.dumps({'pids': pids, 'cwd': str(ROOT), 'url': args.url,
                       'manually_stopped': stopped(args.profile), 'health': current and current['health'],
                       'errors': current and current['errors'], 'setup': current and current['setup'],
@@ -134,11 +138,13 @@ def status(args):
     return outcome(pids, current)
 
 
-def stop(args, intentional=True):
+def stop(args, intentional=True, expected=None):
     """Stop the service gracefully, recording a manual stop marker when `intentional` is True."""
     pids = processes(args.profile)
     if len(pids) > 1:
         raise RuntimeError('Multiple dsh-superagent processes found; refusing to choose one.')
+    if expected is not None and pids and pids != [expected]:
+        raise RuntimeError('The dsh-superagent process changed during the recovery check; no signal was sent.')
     # Write the stop marker before waiting so monitors respect the intentional stop even if graceful shutdown times out.
     if intentional:
         (control(args.profile) / 'manually-stopped').write_text(time.strftime('%Y-%m-%dT%H:%M:%S%z') + '\n')
@@ -213,6 +219,32 @@ def start(args):
     raise RuntimeError('Startup health check timed out; inspect the log. Any running process was left intact.')
 
 
+def recover(args):
+    """Recover under the same operation lock used by start/stop, with no forced shutdown."""
+    pids = processes(args.profile)
+    if len(pids) > 1:
+        raise RuntimeError('Multiple dsh-superagent processes found; refusing automatic recovery.')
+    if not pids:
+        return start(args)
+
+    current = state(args.url)
+    if runtime_up(current):
+        return report_status(args, pids, current)
+    # Ignore a single failed probe and leave a runtime that reports it is still starting alone.
+    time.sleep(1)
+    current = state(args.url)
+    if runtime_up(current) or (current and current['health'].get('runtime') == 'starting'):
+        return report_status(args, pids, current)
+    if current is None:
+        age = subprocess.run(['ps', '-p', str(pids[0]), '-o', 'etimes='],
+                             capture_output=True, text=True).stdout.strip()
+        if not age.isdecimal() or int(age) < args.timeout:
+            print('Management endpoint is unavailable; startup grace is active or process age is unknown.', file=sys.stderr)
+            return report_status(args, pids, current)
+    stop(args, intentional=False, expected=pids[0])
+    return start(args)
+
+
 def optimization(args):
     """Read local evidence or submit an explicitly authored lesson; never restart the service."""
     parsed = urllib.parse.urlsplit(args.url)
@@ -245,7 +277,7 @@ def optimization(args):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=['start', 'stop', 'restart', 'status', 'optimization'])
+    parser.add_argument('action', choices=['start', 'stop', 'restart', 'recover', 'status', 'optimization'])
     parser.add_argument('--profile', default=os.environ.get('DSH_SUPERAGENT_PROFILE') or 'superagent',
                         help='DSH profile that loads dsh-superagent; its tmux session is dsh-<profile>.')
     parser.add_argument('--url', default=os.environ.get('DSH_SUPERAGENT_URL') or 'http://127.0.0.1:3082',
@@ -274,11 +306,13 @@ def main():
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             raise RuntimeError('Another dsh-superagent control operation is in progress.') from None
-        if args.respect_stop and args.action in ('start', 'restart') and stopped(args.profile):
+        if (args.action == 'recover' or (args.respect_stop and args.action in ('start', 'restart'))) and stopped(args.profile):
             print('Intentional stop is active; automatic recovery skipped.')
             return 0
         if args.action == 'status':
             return status(args)
+        if args.action == 'recover':
+            return recover(args)
         if args.action in ('stop', 'restart'):
             # Only a stop keeps automatic recovery off; a restart whose stop timed out leaves it on.
             stop(args, intentional=args.action == 'stop')

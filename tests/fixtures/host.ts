@@ -31,6 +31,7 @@ export function feishu(id: string, text: string, overrides: Record<string, unkno
 type RegisteredTool = { name: string; execute: (args: unknown, execution: { signal: AbortSignal }) => Promise<unknown> }
 type FakeAgent = {
   id: string; status: string; inbox: { nextTurn: UserMessage[]; nextStep: UserMessage[] }
+  session: { append: Mock }
   cancel: Mock; inject: Mock<(message: UserMessage) => void>; steer: Mock<(message: UserMessage) => void>; followup: Mock<(message: UserMessage) => void>
 }
 /** A text message, as DSH's job tools and subagents send their notices. */
@@ -86,10 +87,8 @@ export function jobRegistry(owner: (sessionId: string) => FakeAgent | undefined 
 }
 
 /**
- * DSH's subagents as the Executor uses them. `spawn` starts a child of a Session, an agent while it lives, which a drain of
- * the Session's descendants refuses from then on; `settle` ends one, whose end wakes its idle parent or steers a running one
- * before a wait for the parent's children returns. Releasing or interrupting a child settles it; a drain of descendants
- * injects their ends. The catalog lists every child a Session had.
+ * DSH's recursive subagent API. Interruptions park resident children without closing admission; natural settlement
+ * removes a child and delivers its result. Only drainDescendants permanently closes its selected root.
  */
 export function subagentRuntime(agents: Map<string, FakeAgent>) {
   const children = new Map<string, { parent: string; live: boolean; settled: PromiseWithResolvers<void> }>()
@@ -105,27 +104,41 @@ export function subagentRuntime(agents: Map<string, FakeAgent>) {
     else parent?.steer(ended)
     child.settled.resolve()
   }
+  const depth = (id: string, root: string): number => {
+    const parent = children.get(id)?.parent
+    if (!parent) return 0
+    if (parent === root) return 1
+    const ancestorDepth = depth(parent, root)
+    return ancestorDepth ? ancestorDepth + 1 : 0
+  }
   const service = {
-    waitForChildren: vi.fn(async (parent: { id: string }) => {
-      const live = [...children.values()].filter(child => child.parent === parent.id && child.live)
+    waitForTreeWork: vi.fn(async (parent: { id: string }) => {
+      const live = [...children].filter(([id, child]) => depth(id, parent.id) && child.live).map(([, child]) => child)
       await Promise.all(live.map(child => child.settled.promise))
       return live.length > 0
     }),
-    listChildren: vi.fn(async (id: string) => [...children].filter(([, child]) => child.parent === id).map(([childId]) => ({ id: childId }))),
-    drainChildren: vi.fn(async (_parent: { id: string }, ids: readonly string[]) => { for (const id of ids) settle(id) }),
+    listDescendants: vi.fn(async (parent: string) => [...children].filter(([id]) => depth(id, parent)).map(([id, child]) =>
+      ({ id, parentId: child.parent, depth: depth(id, parent), kind: 'child', mode: 'continuable',
+        activity: agents.has(id) ? 'running' : 'inactive' }))),
     drainDescendants: vi.fn(async (parents: readonly { id: string }[]) => {
       for (const parent of parents) {
         closed.add(parent.id)
         for (const [id, child] of children) if (child.parent === parent.id) settle(id, false)
       }
     }),
-    interrupt: vi.fn((id: string) => { settle(id) }),
+    interrupt: vi.fn((id: string, _authority: { kind: string; agent?: { id: string } }) => {
+      agents.get(id)?.cancel({ kind: 'parent' }, { keepInbox: true })
+    }),
   }
   const spawn = (parent: string) => {
     if (closed.has(parent)) throw new Error('DRAINING: the Session admits no new subagents')
     const id = `child-${children.size + 1}`
-    children.set(id, { parent, live: true, settled: Promise.withResolvers<void>() })
-    agents.set(id, { id, status: 'running', session: { header: { parentSession: parent } } } as never)
+    const child = { parent, live: true, settled: Promise.withResolvers<void>() }
+    children.set(id, child)
+    agents.set(id, { id, get status() { return child.live ? 'running' : 'idle' },
+      inbox: { nextTurn: [], nextStep: [] }, inject: vi.fn(), followup: vi.fn(), steer: vi.fn(),
+      cancel: vi.fn(() => { child.live = false; child.settled.resolve() }),
+      whenIdle: () => child.settled.promise, session: { header: { parentSession: parent } } } as never)
     return id
   }
   return { service, settle, spawn, live: (id: string) => !!children.get(id)?.live }

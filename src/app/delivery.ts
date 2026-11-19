@@ -4,6 +4,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { freezeMessage, MessageId, type ContextFormed, type UserMessage } from '@deepseek-ai/dsh-llm'
 import type { Session } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-session-persistence'
+import { Later } from './effects.ts'
 
 declare module '@deepseek-ai/dsh-llm' {
   interface MessageSourceMap {
@@ -62,8 +63,8 @@ export class AgentDelivery {
     const id = messageId(requestId)
     return (await this.history(agent)).ids.has(id) || [...agent.inbox.nextTurn, ...agent.inbox.nextStep].some(message => deliveryId(message) === id)
   }
-  /** Delivers once to the selected inbox, or injects into history without waking the agent, and flushes Session persistence before acknowledging the producer. */
-  async send(agent: Agent, requestId: string, text: string, mode: 'queue' | 'steer' | { inject: string }, signal: AbortSignal, authorize?: () => void,
+  /** Delivers to an inbox, or appends a visible notice immediately without waking the agent; flushes before acknowledging. */
+  async send(agent: Agent, requestId: string, text: string, mode: 'queue' | 'steer' | { inject: string } | { display: string }, signal: AbortSignal, authorize?: () => void,
     accepted?: () => void): Promise<void> {
     signal.throwIfAborted()
     const seen = await this.history(agent)
@@ -73,10 +74,20 @@ export class AgentDelivery {
     const id = messageId(requestId)
     const pending = [...agent.inbox.nextTurn, ...agent.inbox.nextStep].some(message => deliveryId(message) === id)
     if (!seen.ids.has(id) && !pending) {
-      const source = typeof mode === 'object' ? { kind: 'dsh-superagent' as const, form: 'notice' as const, summary: mode.inject }
+      const source = typeof mode === 'object' ? { kind: 'dsh-superagent' as const, form: 'notice' as const, summary: 'display' in mode ? mode.display : mode.inject }
         : { kind: 'dsh-superagent' as const, form: 'relay' as const }
       const message = freezeMessage({ id, role: 'user' as const, content: [{ type: 'text' as const, text }], source })
-      if (typeof mode === 'object') { agent.inject(message); seen.ids.add(id) }
+      if (typeof mode === 'object') {
+        if ('display' in mode) {
+          // Never splice a user message between an assistant's tool calls and their complete result batch.
+          const boundary = agent.session.snapshotEvents().findLast(event =>
+            event.type === 'step/start' || event.type === 'step/end' || event.type === 'turn/end')
+          if (boundary?.type === 'step/start') throw new Later('Wait for the Session step to finish before displaying its notice')
+          agent.session.append('user/message', message, { surfaceOp: 'append' })
+        }
+        else agent.inject(message)
+        seen.ids.add(id)
+      }
       else if (mode === 'steer') agent.steer(message)
       else agent.followup(message)
     }

@@ -1,18 +1,24 @@
 /** A worker's background work in DSH: waiting for its shell jobs and subagents, and stopping them. */
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { expect, it, vi } from 'vitest'
+import { expect, it, vi, type Mock } from 'vitest'
 import { stopSubagents, untilQuiet } from '../src/executor/background.ts'
 import { jobRegistry } from './fixtures/host.ts'
 
 /** A context with DSH's job registry and subagents, and an idle worker agent with one live subagent, `child-1`. */
-function setup(waitForChildren: (agent: Agent) => Promise<boolean>, drainChildren: () => Promise<void> = async () => {}) {
+function setup(waitForTreeWork: (agent: Agent) => Promise<boolean>, interrupt: () => Promise<void> = async () => {}) {
   const jobs = jobRegistry()
   const agent = { id: 'worker-t1', status: 'idle', whenIdle: async () => {}, inbox: { nextTurn: [], nextStep: [] }, cancel: vi.fn() } as unknown as
-    Agent & { status: string; cancel: ReturnType<typeof vi.fn> }
-  const subagents = { waitForChildren: vi.fn(waitForChildren), listChildren: async () => [{ id: 'child-1' }], drainChildren: vi.fn(drainChildren) }
+    Agent & { status: string; cancel: Mock }
+  let stopped = Promise.resolve()
+  const child = { id: 'child-1', status: 'running', whenIdle: () => stopped, cancel: vi.fn() }
+  const subagents = {
+    waitForTreeWork: vi.fn(waitForTreeWork),
+    listDescendants: async () => [{ kind: 'child', id: child.id, parentId: agent.id, depth: 1, activity: 'running', mode: 'continuable' }],
+    interrupt: vi.fn(() => { stopped = interrupt().then(() => { child.status = 'idle' }) }),
+  }
   const services: Record<string, unknown> = { jobs: jobs.service, subagents }
-  const ctx = { get: (name: string) => services[name], agents: { get: () => agent } } as unknown as Context
+  const ctx = { get: (name: string) => services[name], agents: { get: (id: string) => id === agent.id ? agent : child } } as unknown as Context
   return { ctx, agent, jobs, subagents }
 }
 
@@ -59,19 +65,37 @@ it('joins a worker\'s subagents once for the looks that wait on them, as DSH can
     stop.abort()
     expect(await quiet).toBe(false)
   }
-  expect(subagents.waitForChildren).toHaveBeenCalledTimes(1)
+  expect(subagents.waitForTreeWork).toHaveBeenCalledTimes(1)
 })
 
-it('gives up a release of subagents that does not end within 10 seconds, and cancels the turn their ends woke', async () => {
+it('bounds a subagent interruption to 10 seconds, reports its timeout and still cancels the parent', async () => {
   const { ctx, agent } = setup(async () => false, () => new Promise(() => {}))
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
   try {
     let stopped = false
-    const stopping = stopSubagents(ctx, agent).then(() => { stopped = true })
+    const stopping = expect(stopSubagents(ctx, agent)).rejects.toMatchObject({
+      errors: [expect.objectContaining({ name: 'TimeoutError' })],
+    }).then(() => { stopped = true })
     await vi.advanceTimersByTimeAsync(9_999)
     expect(stopped).toBe(false)
     await vi.advanceTimersByTimeAsync(1)
     await stopping
   } finally { vi.useRealTimers() }
   expect(agent.cancel).toHaveBeenCalledWith({ kind: 'user' }, { keepInbox: false })
+})
+
+it('waits for settlement notices before cancelling the parent so a late child result cannot wake it again', async () => {
+  const settlement = Promise.withResolvers<boolean>()
+  const { ctx, agent, subagents } = setup(() => settlement.promise)
+  agent.cancel.mockImplementation(() => { agent.status = 'idle' })
+  let stopped = false
+  const stopping = stopSubagents(ctx, agent).then(() => { stopped = true })
+  await vi.waitFor(() => expect(subagents.interrupt).toHaveBeenCalled())
+  expect(stopped).toBe(false)
+  expect(agent.cancel).not.toHaveBeenCalled()
+  // The SDK flushes and disposes after idle, then its settlement notice wakes the parent.
+  agent.status = 'running'
+  settlement.resolve(true)
+  await stopping
+  expect(agent.status).toBe('idle')
 })

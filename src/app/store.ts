@@ -138,7 +138,7 @@ export class Store implements Repositories {
   }
   private depth = 0
   /** Callbacks queued to run once the outermost transaction commits, indexed by savepoint level; rolling back a level discards its callbacks. */
-  private readonly committed: (() => void)[][] = []
+  private readonly committed: ((batch?: object) => void)[][] = []
   /**
    * Executes `operation` in a savepoint transaction (nested inside the current transaction if any); a failure rolls back its changes.
    * Post-commit callbacks run only after the outermost transaction commits, and callback errors are reported without failing the committed transaction.
@@ -161,15 +161,15 @@ export class Store implements Repositories {
     finally { if (this.depth > level) this.depth-- }
     const actions = this.committed.splice(level)[0]!
     if (level) this.committed[level - 1]!.push(...actions)
-    else for (const action of actions) { try { action() } catch (error) { this.report(error) } }
+    else for (const action of actions) { try { action(actions) } catch (error) { this.report(error) } }
     return value
   }
   /**
    * Schedules `action` to run once the outermost transaction commits, or immediately if outside a transaction;
-   * callbacks queued inside a transaction that rolls back are discarded and never run.
+   * Callbacks in the same outermost commit receive the same opaque batch identity; rolled-back callbacks never run.
    * Use `afterCommit` for immediate in-memory follow-ups to a committed write (such as refreshing health or cancelling an in-memory turn) that cannot wait for the effect queue and need not survive a restart; use `Effects` for durable side effects that must survive a crash.
    */
-  afterCommit(action: () => void): void {
+  afterCommit(action: (batch?: object) => void): void {
     if (this.depth) this.committed[this.depth - 1]!.push(action)
     else action()
   }

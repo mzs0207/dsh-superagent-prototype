@@ -7,6 +7,7 @@ import type { SettingsVersion } from './app/store.ts'
 import type { SettingsSave } from './policy.ts'
 import type { Retry } from './sources/github.ts'
 import type { ZentaoWorkflow } from './app/tools/zentao.ts'
+import type { WaitReason } from './core/model.ts'
 
 /** Key of a KV record whose value has type `V`; a plain string represents an untyped key. */
 export type Key<V> = string & { readonly __value?: V }
@@ -30,14 +31,16 @@ export const KV = {
   prompts: { revision: record<number>('prompt-revision'), version: family<PromptVersion, [revision: number]>('prompt-version:'),
     /** The built-in text of a prompt part an override was edited from, by its `base`, which shows what an upgrade changed. */
     builtIn: family<string, [base: string]>('prompt-built-in:') },
-  /** Runtime: the main Session's ID. */
-  runtime: { masterId: record<string>('master-id') },
+  /** Runtime: main Session ID, current blocker receipt, and its persisted episode identity (cleared on recovery). */
+  runtime: { masterId: record<string>('master-id'), intervention: family<string>('human-intervention:'),
+    interventionEpisode: family<{ id: string; signature: string }>('human-intervention-episode:') },
   /** Sessions: prompt revisions each Session has worked under, ordered oldest first; the last entry (`.at(-1)`) is its active revision. */
   sessions: { prompts: family<number[], [session: string]>('session-prompts:') },
   /** Fingerprint of each successfully retained document, scoped to its Hindsight connection and repository. */
   memory: { retained: family<string>('memory-retained:') },
   /** First activation of the local optimization collector; not a claim of historical coverage. */
-  optimization: { startedAt: record<string>('optimization-started-at') },
+  optimization: { startedAt: record<string>('optimization-started-at'),
+    pendingWait: family<{ episode: string; signature: string; assignment: string; reason: WaitReason | 'unknown'; at: string }>('optimization-pending-wait:') },
   /** Schema 11 migration: legacy main-Session queues imported into the effect table. */
   queues: { relays: record<{ id: string; text: string }[]>('relay-queue'), unsubscribed: record<string[]>('subscription-results'),
     prompts: record<number | null>('prompt-notification'), settings: record<number | null>('settings-notification') },

@@ -1,9 +1,10 @@
 import { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { createUserMessage, type UserMessage } from '@deepseek-ai/dsh-llm'
-import { SessionId, SessionSeq, type SessionEvent } from '@deepseek-ai/dsh-session'
+import { createAssistantMessage, createToolResultMessage, createUserMessage, ToolCallId, type UserMessage } from '@deepseek-ai/dsh-llm'
+import { Session, SessionId, SessionSeq, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { expect, it, vi } from 'vitest'
 import { AgentDelivery } from '../src/app/delivery.ts'
+import { Later } from '../src/app/effects.ts'
 
 function fixture(history: UserMessage[] = []) {
   const ctx = new Context()
@@ -11,8 +12,9 @@ function fixture(history: UserMessage[] = []) {
   const steer = vi.fn((message: UserMessage) => { inbox.nextStep.push(message) })
   const followup = vi.fn((message: UserMessage) => { inbox.nextTurn.push(message) })
   const injected = vi.fn((_message: UserMessage) => {})
+  const appended = vi.fn((_type: string, message: UserMessage) => { history.push(message) })
   // Only the delivery-facing Agent methods participate in this fixture.
-  const agent = { id: SessionId('delivery-test'), session: {}, inbox, steer, followup, inject: injected } as unknown as Agent
+  const agent = { id: SessionId('delivery-test'), session: { append: appended, snapshotEvents: () => [] }, inbox, steer, followup, inject: injected } as unknown as Agent
   const event = (message: UserMessage): SessionEvent => ({ type: 'user/message', seq: SessionSeq(0), time: 0, surfaceOp: 'append', data: message })
   const read = vi.fn(async (offset: number, length: number) => ({ events: history.slice(offset, offset + length).map(event) }))
   const close = vi.fn(async () => {})
@@ -30,7 +32,7 @@ function fixture(history: UserMessage[] = []) {
     inbox.nextStep.splice(0); inbox.nextTurn.splice(0)
     ctx.emit('session/event', agent.session, event(message))
   }
-  return { agent, agents, inbox, steer, followup, injected, open, read, close, flush, send, inject, holds, consume, signal }
+  return { agent, agents, inbox, steer, followup, injected, appended, delivery, open, read, close, flush, send, inject, holds, consume, signal }
 }
 
 it.each(['queue', 'steer'] as const)('delivers %s as an orchestrator relay, deduplicating pending and consumed messages', async mode => {
@@ -132,6 +134,46 @@ it('injects a notice once, as dsh-superagent\'s notice with its summary, without
   expect(f.injected).toHaveBeenCalledOnce()
   expect(f.injected.mock.calls[0]![0]).toMatchObject({ role: 'user', source: { kind: 'dsh-superagent', form: 'notice', summary: 'Settings saved' } })
   expect([f.steer, f.followup].map(spy => spy.mock.calls.length)).toEqual([0, 0])
+})
+
+it('persists a visible notice immediately without leaving it in an idle worker inbox or waking a model', async () => {
+  const f = fixture(), text = '需要你处理：请确认最低支持版本。'
+  await f.delivery.send(f.agent, 'visible', text, { display: '需要你处理' }, f.signal.signal)
+  await f.delivery.send(f.agent, 'visible', text, { display: '需要你处理' }, f.signal.signal)
+  expect(f.appended).toHaveBeenCalledExactlyOnceWith('user/message', expect.objectContaining({
+    content: [{ type: 'text', text }], source: { kind: 'dsh-superagent', form: 'notice', summary: '需要你处理' },
+  }), { surfaceOp: 'append' })
+  expect([f.steer, f.followup, f.injected].map(spy => spy.mock.calls.length)).toEqual([0, 0, 0])
+  const restored = fixture([f.appended.mock.calls[0]![1]])
+  await restored.delivery.send(restored.agent, 'visible', text, { display: '需要你处理' }, restored.signal.signal)
+  expect(restored.appended).not.toHaveBeenCalled()
+})
+
+it('waits for all tool results in a real SDK step before adding a visible notice to model history', async () => {
+  const f = fixture(), session = Session.create(f.agent.id)
+  Object.assign(f.agent, { session })
+  const calls = [ToolCallId('report'), ToolCallId('parallel')]
+  session.append('turn/start', { turn: 1 })
+  session.append('step/start', { turn: 1, step: 1 })
+  session.append('assistant/message', { turn: 1, step: 1, stream: [], message: createAssistantMessage({
+    content: calls.map(id => ({ type: 'tool-call', id, name: 'orchestrator_report', arguments: '{}' })),
+    source: { provider: 'fixture', model: 'fixture' },
+  }) }, { surfaceOp: 'append' })
+  for (const callId of calls) session.append('tool/call', { turn: 1, step: 1, callId, name: 'orchestrator_report', arguments: '{}' })
+  const show = () => f.delivery.send(f.agent, 'visible', '需要你处理', { display: '需要你处理' }, f.signal.signal)
+  await expect(show()).rejects.toBeInstanceOf(Later)
+  session.append('tool/result', { turn: 1, step: 1, message: createToolResultMessage({
+    callId: calls[0]!, content: [{ type: 'text', text: 'reported' }], isError: false,
+  }) }, { surfaceOp: 'append' })
+  await expect(show()).rejects.toBeInstanceOf(Later)
+  session.append('tool/result', { turn: 1, step: 1, message: createToolResultMessage({
+    callId: calls[1]!, content: [{ type: 'text', text: 'done' }], isError: false,
+  }) }, { surfaceOp: 'append' })
+  session.append('step/end', { turn: 1, step: 1 })
+  await show()
+  expect(session.snapshotEvents().map(event => event.type)).toEqual([
+    'turn/start', 'step/start', 'assistant/message', 'tool/call', 'tool/call', 'tool/result', 'tool/result', 'step/end', 'user/message',
+  ])
 })
 
 it('tells whether the Session holds a message: one waiting in its inbox, one it took, and one in its stored history', async () => {

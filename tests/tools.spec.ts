@@ -8,6 +8,8 @@ import { RESOURCES } from '../src/app/resources.ts'
 import { CliError, Commands } from '../src/infra/commands.ts'
 import { IM_WORDS, NOTE_WORDS } from '../src/infra/text.ts'
 import { CHAT, feishu, startRuntime, type Host } from './fixtures/host.ts'
+import { ZentaoConfigSchema, zentaoKind, zentaoTrigger } from '../src/sources/zentao.ts'
+import { githubChannel } from '../src/sources/github-trigger.ts'
 
 let h: Host
 beforeEach(async () => { h = await startRuntime() })
@@ -371,7 +373,8 @@ it('reads a trigger once with the message it replies to and the messages around 
 
 const relaysOf = (kind: string) => h.relays(h.runtime.masterId).filter(item => item.kind === kind)
 const notices = () => h.agents.get(h.runtime.masterId)!.inject.mock.calls
-  .map(([message]) => JSON.parse(message.content.map(block => block.type === 'text' ? block.text : '').join('')) as Record<string, unknown>)
+  .map(([message]) => message.content.map(block => block.type === 'text' ? block.text : '').join(''))
+  .filter(text => text.startsWith('{')).map(text => JSON.parse(text) as Record<string, unknown>)
 
 it('shows a candidate with its thread\'s tickets open first, the tickets it reached, those its text names, and a short next step', async () => {
   const first = await h.acceptedTicket(feishu('1', '@bot 修一下回归'))
@@ -400,6 +403,196 @@ it('shows a candidate with its thread\'s tickets open first, the tickets it reac
   h.runtime.store.threads.save(thread)
   h.runtime.receive(feishu('4', '@bot 看看 #123 的进展')); await h.runtime.idle()
   expect(relaysOf('candidate').at(-1)).toMatchObject({ related_tickets: [], tickets_total: 0, referenced_tickets: [{ ticket_id: a.id }] })
+})
+
+it('automatically sends human action and leaves readable notices in both sessions without another model turn', async () => {
+  const { ticket, sessionId } = await h.acceptedTicket(feishu('1', '@bot 修一下回归'))
+  const sent = vi.spyOn(Commands.prototype, 'lark').mockResolvedValue({}).mockClear()
+  h.agents.get(sessionId)!.session.append.mockClear()
+  h.agents.get(h.runtime.masterId)!.session.append.mockClear()
+  const args = { state: 'progress', summary: '需要决定兼容范围。', human_action: '是否需要兼容旧版客户端？' }
+  await h.runTool(sessionId, 'orchestrator_report', args)
+  await h.runtime.idle()
+  expect(sent).toHaveBeenCalledExactlyOnceWith(['im', '+messages-reply', '--message-id', 'om_1', '--markdown',
+    expect.stringContaining(args.human_action), '--reply-in-thread', '--idempotency-key', expect.any(String)])
+  for (const id of [h.runtime.masterId, sessionId]) {
+    const messages = h.agents.get(id)!.session.append.mock.calls.filter(([type]) => type === 'user/message').map(([, message]) => message)
+    expect(messages).toContainEqual(expect.objectContaining({
+      source: expect.objectContaining({ form: 'notice', summary: expect.stringContaining(args.human_action) }),
+      content: [expect.objectContaining({ type: 'text', text: expect.stringContaining(args.human_action) })],
+    }))
+  }
+  await h.runTool(sessionId, 'orchestrator_report', args)
+  await h.runtime.idle()
+  expect(sent).toHaveBeenCalledTimes(1)
+  await h.runTool(sessionId, 'orchestrator_report', { state: 'progress', summary: '继续检查其他部分。' })
+  await h.runtime.idle()
+  expect(sent).toHaveBeenCalledTimes(1)
+  for (const id of [h.runtime.masterId, sessionId]) expect(h.agents.get(id)!.session.append).toHaveBeenCalledTimes(1)
+  await h.runTool(h.runtime.masterId, 'orchestrator_reply', { purpose: 'attention', ticket_id: ticket.id,
+    human_action: args.human_action, text: '请确认兼容范围。' })
+  await h.runtime.idle()
+  expect(sent).toHaveBeenCalledTimes(1)
+})
+
+it('shows another ticket and main-session reminders while one worker remains inside a long step', async () => {
+  const first = await h.acceptedTicket(feishu('1', '@bot 修一下回归'))
+  const second = await h.acceptedTicket(feishu('2', '@bot 修另一个回归'))
+  const worker = h.agents.get(first.sessionId)!.session
+  Object.assign(worker, { snapshotEvents: () => [{ type: 'step/start' }] })
+  const a = '请确认第一个任务的权限。', b = '请确认第二个任务的范围。'
+  h.runtime.engine.report(first.ticket.id, { state: 'progress', summary: 'waiting', question: a })
+  h.runtime.engine.report(second.ticket.id, { state: 'progress', summary: 'waiting', question: b })
+  await h.runtime.idle()
+  for (const sessionId of [h.runtime.masterId, second.sessionId]) {
+    expect(h.agents.get(sessionId)!.session.append.mock.calls.filter(([type]) => type === 'user/message').map(([, message]) => message.content))
+      .toContainEqual([expect.objectContaining({ text: expect.stringContaining(b) })])
+  }
+  expect(worker.append.mock.calls.filter(([type]) => type === 'user/message')).toEqual([])
+  Object.assign(worker, { snapshotEvents: () => [{ type: 'step/end' }] })
+  vi.useFakeTimers({ toFake: ['Date'], now: Date.now() + 3000 })
+  try { await h.runtime.pump(); await h.runtime.idle() } finally { vi.useRealTimers() }
+  expect(worker.append.mock.calls.filter(([type]) => type === 'user/message').map(([, message]) => message.content))
+    .toContainEqual([expect.objectContaining({ text: expect.stringContaining(a) })])
+})
+
+it('withdraws replaced or cleared automatic questions before paused delivery resumes', async () => {
+  const { ticket, sessionId } = await h.acceptedTicket(feishu('1', '@bot 修一下回归'))
+  const sent = vi.spyOn(Commands.prototype, 'lark').mockResolvedValue({}).mockClear()
+  const settings = h.runtime.store.settings()
+  h.runtime.store.saveSettings({ ...settings, paused: true })
+  for (const question of ['旧问题', '新问题']) {
+    await h.runTool(sessionId, 'orchestrator_report', { state: 'progress', summary: '待确认', human_action: question })
+  }
+  const pending = h.runtime.store.receipts.waiting().filter(item => item.ticketId === ticket.id)
+  expect(pending).toHaveLength(1)
+  expect(pending[0]!.text).toContain('新问题')
+  await h.runTool(sessionId, 'orchestrator_report', { state: 'progress', summary: '已确认', human_action: null })
+  h.runtime.store.saveSettings(settings)
+  await h.runtime.idle()
+  expect(sent).not.toHaveBeenCalled()
+})
+
+it.each(['blocked', 'failed'] as const)('notifies an unstructured %s handoff without inventing a question or waking its worker', async state => {
+  const { ticket, sessionId } = await h.acceptedTicket(feishu('1', '@bot 修一下回归'))
+  const sent = vi.spyOn(Commands.prototype, 'lark').mockResolvedValue({}).mockClear()
+  const before = h.deliveries.mock.calls.filter(([call]) => call.sessionId === sessionId).length
+  h.runtime.store.atomic(() => h.runtime.engine.report(ticket.id, { state, summary: '测试账号不可用，无法继续。' }))
+  await h.runtime.idle()
+  expect(sent).toHaveBeenCalledExactlyOnceWith(['im', '+messages-reply', '--message-id', 'om_1', '--markdown',
+    expect.stringContaining('测试账号不可用'), '--reply-in-thread', '--idempotency-key', expect.any(String)])
+  expect(h.runtime.store.tickets.get(ticket.id)!.attention).toBeUndefined()
+  expect(h.deliveries.mock.calls.filter(([call]) => call.sessionId === sessionId)).toHaveLength(before)
+  expect(h.agents.get(sessionId)!.session.append.mock.calls.filter(([type]) => type === 'user/message').map(([, message]) => message.content))
+    .toContainEqual([expect.objectContaining({ text: expect.stringContaining('测试账号不可用') })])
+})
+
+it('keeps raw runtime failures in sessions instead of publishing them to a GitHub issue', async () => {
+  const { ticket, trigger, sessionId } = await h.acceptedTicket(feishu('1', '@bot 修一下回归'))
+  const channel = githubChannel(42)
+  h.runtime.store.triggers.save({ ...trigger, source: 'github', channel })
+  h.runtime.store.tickets.save({ ...h.runtime.store.tickets.get(ticket.id)!, channels: [channel] })
+  const sent = vi.spyOn(Commands.prototype, 'gh').mockResolvedValue([]).mockClear()
+  h.runtime.engine.report(ticket.id, { state: 'failed', summary: 'prepare failed: /private/workspace?token=synthetic-secret' })
+  await h.runtime.idle()
+  expect(sent).not.toHaveBeenCalled()
+  expect(h.agents.get(sessionId)!.session.append.mock.calls.filter(([type]) => type === 'user/message').map(([, message]) => message.content))
+    .toContainEqual([expect.objectContaining({ text: expect.stringContaining('synthetic-secret') })])
+})
+
+it.each(['progress', 'retry', 'human-input'] as const)('withdraws an offline blocker before reconnecting after %s resumes it', async resume => {
+  const { ticket } = await h.acceptedTicket(feishu('1', '@bot 修一下回归'))
+  const sent = vi.spyOn(Commands.prototype, 'lark').mockResolvedValue({}).mockClear()
+  const settings = h.runtime.store.settings()
+  h.runtime.store.saveSettings({ ...settings, paused: true })
+  h.runtime.engine.report(ticket.id, { state: 'blocked', summary: '缺少账号，需要人工处理。' })
+  const pending = h.runtime.store.receipts.waiting().find(item => item.ticketId === ticket.id)!
+  expect(pending.text).toContain('缺少账号')
+  if (resume === 'retry') h.runtime.engine.retryTicket(ticket.id)
+  else if (resume === 'human-input') h.runtime.receive(feishu('2', '账号已补充，请继续。', { root_id: 'om_1' }))
+  else h.runtime.engine.report(ticket.id, { state: 'progress', summary: '账号已恢复，继续处理。' })
+  h.runtime.store.saveSettings(settings)
+  await h.runtime.idle()
+  expect(sent.mock.calls.filter(([args]) => args[1] === '+messages-reply' || args[1] === '+messages-send')).toEqual([])
+})
+
+it.each([
+  { state: 'blocked', resume: 'progress' },
+  { state: 'failed', resume: 'progress' },
+  { state: 'blocked', resume: 'human-input' },
+  { state: 'failed', resume: 'human-input' },
+] as const)('notifies a new $state episode after $resume, deduplicating repeats within each episode', async ({ state, resume }) => {
+  const { ticket, sessionId } = await h.acceptedTicket(feishu('1', '@bot 修一下回归'))
+  const sent = vi.spyOn(Commands.prototype, 'lark').mockResolvedValue({}).mockClear()
+  for (const id of [h.runtime.masterId, sessionId]) h.agents.get(id)!.session.append.mockClear()
+  const report = { state, summary: '测试账号不可用，无法继续。' }
+  vi.useFakeTimers({ toFake: ['Date'], now: Date.now() })
+  try {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await h.runTool(sessionId, 'orchestrator_report', report)
+      await h.runtime.idle()
+    }
+    expect(sent.mock.calls.filter(([args]) => args[1] === '+messages-reply')).toHaveLength(1)
+    for (const id of [h.runtime.masterId, sessionId]) {
+      expect(h.agents.get(id)!.session.append.mock.calls.filter(([type]) => type === 'user/message')).toHaveLength(1)
+    }
+    if (resume === 'human-input') h.runtime.receive(feishu('2', '已补充账号，请继续。', { root_id: 'om_1' }))
+    else await h.runTool(sessionId, 'orchestrator_report', { state: 'progress', summary: '继续核对账号。' })
+    await h.runtime.idle()
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await h.runTool(sessionId, 'orchestrator_report', report)
+      await h.runtime.idle()
+    }
+    const outbound = sent.mock.calls.filter(([args]) => args[1] === '+messages-reply').map(([args]) => args)
+    expect(outbound).toHaveLength(2)
+    expect(outbound[1]!.at(-1)).not.toBe(outbound[0]!.at(-1))
+    for (const id of [h.runtime.masterId, sessionId]) {
+      const messages = h.agents.get(id)!.session.append.mock.calls.filter(([type]) => type === 'user/message').map(([, message]) => message)
+      expect(messages).toHaveLength(2)
+      expect(messages[1]!.id).not.toBe(messages[0]!.id)
+      expect(messages[1]!.content).toEqual(messages[0]!.content)
+    }
+    expect(h.runtime.store.tickets.get(ticket.id)!.assignments.at(-1)!.id).toBe(ticket.assignments.at(-1)!.id)
+  } finally { vi.useRealTimers() }
+})
+
+it('keeps long human actions visible in full while the automatic IM stays within its transport limit', async () => {
+  const { sessionId } = await h.acceptedTicket(feishu('1', '@bot 修一下回归'))
+  const sent = vi.spyOn(Commands.prototype, 'lark').mockResolvedValue({}).mockClear()
+  const question = '请确认兼容范围。'.repeat(70)
+  await h.runTool(sessionId, 'orchestrator_report', { state: 'progress', summary: '待确认', human_action: question })
+  await h.runtime.idle()
+  expect(sent).toHaveBeenCalledTimes(1)
+  expect(h.agents.get(sessionId)!.session.append.mock.calls.filter(([type]) => type === 'user/message').map(([, message]) => message.content))
+    .toContainEqual([expect.objectContaining({ text: expect.stringContaining(question) })])
+})
+
+it('automatically delivers ZenTao questions and blockers to the fixed recipient in one topic', async () => {
+  const { ticket, trigger, sessionId } = await h.acceptedTicket(feishu('1', '@bot 修一下回归'))
+  const config = ZentaoConfigSchema.parse({ baseUrl: 'http://zentao.invalid', account: 'alice', repository: h.runtime.deployment.webUrl })
+  const origin = { ...zentaoTrigger(config, { id: 1, title: 'Regression', product: 4, assignedTo: 'alice', status: 'active',
+    activatedCount: 0, deleted: false, steps: '', openedDate: '', actions: [] }), id: trigger.id }
+  h.runtime.sources.register(zentaoKind)
+  const settings = h.runtime.store.settings()
+  h.runtime.store.saveSettings({ ...settings, sources: { ...settings.sources, zentao: { enabled: true, config },
+    feishu: { ...settings.sources.feishu!, config: { ...settings.sources.feishu!.config, notificationOpenId: 'ou_operator' } } } })
+  h.runtime.store.triggers.save(origin)
+  h.runtime.store.tickets.save({ ...h.runtime.store.tickets.get(ticket.id)!, channels: [origin.channel!], resume: 'manual' })
+  const sent = vi.spyOn(Commands.prototype, 'lark').mockResolvedValue({ message_id: 'om_notice' }).mockClear()
+  const question = '请提供复现账号。'
+  await h.runTool(sessionId, 'orchestrator_report', { state: 'progress', summary: '等待账号', human_action: question })
+  await h.runtime.idle()
+  expect(sent).toHaveBeenCalledExactlyOnceWith(['im', '+messages-send', '--user-id', 'ou_operator', '--text',
+    expect.stringContaining(question), '--idempotency-key', expect.any(String)])
+  const report = { state: 'blocked', summary: '缺少账号，自动处理已暂停。', human_action: question }
+  await h.runTool(sessionId, 'orchestrator_report', report)
+  await h.runtime.idle()
+  expect(sent).toHaveBeenLastCalledWith(['im', '+messages-reply', '--message-id', 'om_notice', '--text',
+    expect.stringContaining(question), '--reply-in-thread', '--idempotency-key', expect.any(String)])
+  expect(sent).toHaveBeenCalledTimes(2)
+  await h.runTool(sessionId, 'orchestrator_report', report)
+  await h.runtime.idle()
+  expect(sent).toHaveBeenCalledTimes(2)
 })
 
 it('relays a worker\'s report with its ticket card and the start of its summary, and a question with the card alone', async () => {

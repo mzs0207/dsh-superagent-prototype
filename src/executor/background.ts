@@ -5,6 +5,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { SessionId } from '@deepseek-ai/dsh-session'
+import type { SubagentRuntime } from '@deepseek-ai/dsh-subagent'
 
 /** What the Executor uses of DSH's job registry: the jobs a Session can see, their events, a wait for one and a kill. */
 interface Jobs {
@@ -13,12 +14,8 @@ interface Jobs {
   kill(id: string, caller: string, reason?: string): unknown
   readonly events: { subscribe(filter: { owner: string }, listener: (event: { type: string }) => void): () => void }
 }
-/** What the Executor uses of DSH's subagents: joining a worker's subagents that work, its subagents, and releasing them. */
-interface Subagents {
-  waitForChildren(parent: Agent): Promise<boolean>
-  listChildren(parentSessionId: string): Promise<readonly { id: string }[]>
-  drainChildren(parent: Agent, childIds: readonly string[]): Promise<void>
-}
+/** Use the SDK contract so removed lifecycle methods fail typechecking instead of live worker cleanup. */
+type Subagents = Pick<SubagentRuntime, 'waitForTreeWork' | 'listDescendants' | 'interrupt'>
 /** How long a stop waits for a killed job to end, collecting its end so the worker is not woken to hear of it. */
 const KILL_WAIT_MS = 10_000
 /** How long a release of subagents may take; it can hold up a shutdown, so DSH's own callers bound it too. */
@@ -49,7 +46,7 @@ const joins = new WeakMap<Agent, Promise<boolean>>()
 function childrenEnd(subagents: Subagents, agent: Agent): Promise<boolean> {
   let join = joins.get(agent)
   if (!join) {
-    join = subagents.waitForChildren(agent).finally(() => { joins.delete(agent) })
+    join = subagents.waitForTreeWork(agent).finally(() => { joins.delete(agent) })
     joins.set(agent, join)
   }
   return join
@@ -134,22 +131,46 @@ export async function collectJob(ctx: Context, sessionId: string, job: { id: str
 }
 
 /**
- * Release the worker's live subagents, for a bounded time. DSH delivers each one's end to the worker before the release
- * returns, which wakes it, so the worker's turn is cancelled after, keeping its inbox when `keepInbox`, and the stop ends
- * with that turn. Its Session still admits subagents.
+ * Interrupt resident descendants without permanently closing the worker's subagent admission. Clear local descendants'
+ * parked inputs, await their idle, and cancel any parent turn their ends woke. `keepInbox` applies only to the parent's
+ * already-delivered inputs during restart.
  */
 export async function stopSubagents(ctx: Context, agent: Agent, keepInbox = false): Promise<void> {
   const subagents = subagentsOf(ctx)
   if (!subagents) return
-  // The catalog lists every subagent the Session had; one that ended has no agent.
-  const live = (await subagents.listChildren(agent.id)).map(child => child.id).filter(id => ctx.agents.get(id as SessionId))
-  if (!live.length) return
-  try { await until(subagents.drainChildren(agent, live), undefined, DRAIN_LIMIT_MS) }
-  finally {
-    if (agent.status !== 'idle') cancelled.add(agent)
-    agent.cancel({ kind: 'user' }, { keepInbox })
-    await until(agent.whenIdle(), undefined, DRAIN_LIMIT_MS)
+  const descendants = await subagents.listDescendants(agent.id, AbortSignal.timeout(DRAIN_LIMIT_MS))
+  const failures: unknown[] = [], waits: Promise<unknown>[] = []
+  let interrupted = false
+  try {
+    // Catalog order is pre-order: stop descendants before their ancestors.
+    for (let i = descendants.length - 1; i >= 0; i--) {
+      const child = descendants[i]!
+      if (child.kind === 'diagnostic') {
+        failures.push(Object.assign(new Error('Cannot inspect a subagent catalog'), { code: 'SUBAGENT_CATALOG_UNAVAILABLE' }))
+        continue
+      }
+      if (child.activity !== 'running') continue
+      interrupted = true
+      try {
+        const loaded = ctx.agents.get(child.id)
+        subagents.interrupt(child.id, { kind: 'ancestor', agent })
+        loaded?.cancel({ kind: 'parent' }, { keepInbox: false })
+        if (loaded) waits.push(loaded.whenIdle())
+      } catch (error) { failures.push(error) }
+    }
+    // Idle precedes SDK flushing/disposal and result delivery, which can wake the parent. Join that settlement first.
+    if (interrupted) waits.push(subagents.waitForTreeWork(agent))
+    const settled = await until(Promise.allSettled(waits), undefined, DRAIN_LIMIT_MS)
+    if (settled === false) failures.push(new DOMException('Subagent interruption timed out', 'TimeoutError'))
+    else for (const result of settled) if (result.status === 'rejected') failures.push(result.reason)
+  } finally {
+    if (interrupted) {
+      if (agent.status !== 'idle') cancelled.add(agent)
+      agent.cancel({ kind: 'user' }, { keepInbox })
+      await until(agent.whenIdle(), undefined, DRAIN_LIMIT_MS)
+    }
   }
+  if (failures.length) throw new AggregateError(failures, 'Interrupting worker subagents failed')
 }
 
 /**

@@ -30,6 +30,10 @@ beforeEach(() => {
   copyFileSync(join(import.meta.dirname, '..', 'scripts', 'dsh-superagent'), join(root, 'scripts', 'dsh-superagent'))
   processes()
   program('ps', `list='${root}/ps.txt'; [ -f '${root}/launched' ] && [ -f '${root}/ps-started.txt' ] && list='${root}/ps-started.txt'
+if [ "$4" = etimes= ]; then
+  if [ -f '${root}/old-process' ]; then echo 120; else echo 0; fi
+  exit 0
+fi
 want=; while [ $# -gt 0 ]; do [ "$1" = -p ] && want=$2; shift; done
 while IFS= read -r line; do
   case "$line" in after:*) dep=\${line#after:}; dep=\${dep%% *}; kill -0 "$dep" 2>/dev/null && continue; line=\${line#after:$dep };; esac
@@ -134,6 +138,54 @@ it('waits only for the process it stopped', async () => {
   processes(service(pid), `after:${pid} ${service(sleeper())}`)
   expect(await run('stop', '--stop-timeout', '5')).toMatchObject({ code: 0, stdout: expect.stringContaining('dsh-superagent stopped') })
 }, 20_000)
+it('replaces only the one unhealthy process and starts a fresh healthy instance', async () => {
+  const url = await answering()
+  const old = sleeper(), fresh = sleeper()
+  processes(service(old))
+  writeFileSync(join(root, 'old-process'), '')
+  started(service(fresh))
+  writeFileSync(join(root, 'pane'), `${fresh}\n`)
+  expect(await run('recover', '--url', url, '--timeout', '5', '--stop-timeout', '3')).toMatchObject({ code: 0 })
+  expect(sleepers[0]?.signalCode).toBe('SIGINT')
+  expect(await status('superagent', url)).toMatchObject({ pids: [fresh], manually_stopped: false })
+}, 15_000)
+
+it('leaves a new process alive while its management port is unavailable, then reports it ready', async () => {
+  const pid = sleeper()
+  processes(service(pid))
+  const url = await answering()
+  expect(await run('recover', '--url', url)).toMatchObject({
+    code: 1, stderr: expect.stringContaining('startup grace'),
+  })
+  expect(sleepers[0]?.signalCode).toBeNull()
+  writeFileSync(join(root, 'launched'), '')
+  expect(await run('recover', '--url', url)).toMatchObject({ code: 0 })
+  expect(await status('superagent', url)).toMatchObject({ pids: [pid] })
+  expect(existsSync(join(root, 'tmux.log'))).toBe(false)
+})
+
+it.each([
+  [0, READY],
+  [2, { ...READY, health: { ...READY.health, github: { state: 'error', detail: 'bad credential' } } }],
+  [3, { ...READY, setup: { problem: { code: 'needsSetup' } } }],
+])('keeps the original process when status is %i', async (code, body) => {
+  const pid = sleeper()
+  processes(service(pid))
+  expect(await run('recover', '--url', await answering(body, true))).toMatchObject({ code })
+  expect(sleepers[0]?.signalCode).toBeNull()
+  expect(existsSync(join(root, 'tmux.log'))).toBe(false)
+})
+
+it('honors a stop marker and refuses duplicate instances', async () => {
+  expect(await run('stop')).toMatchObject({ code: 0 })
+  processes(service(sleeper()))
+  expect(await run('recover')).toMatchObject({ code: 0, stdout: expect.stringContaining('Intentional stop') })
+  expect(sleepers[0]?.signalCode).toBeNull()
+  processes(service(sleeper(), 'other'), service(sleeper(), 'other'))
+  expect(await run('recover', '--profile', 'other')).toMatchObject({ code: 1, stderr: expect.stringContaining('Multiple') })
+  expect(sleepers.every(child => child.signalCode === null)).toBe(true)
+  expect(existsSync(join(root, 'tmux.log'))).toBe(false)
+})
 it('keeps only the newest logs it wrote for the profile', async () => {
   const url = await answering()
   const pid = sleeper()

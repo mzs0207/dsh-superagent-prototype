@@ -51,7 +51,7 @@ export function guardZentaoReport(host: ZentaoToolsHost, ticket: Ticket, report:
   if (waitsForPerson(ticket) && report.state !== 'blocked' && report.state !== 'failed') throw new Error('This bug is paused; wait for a panel Retry or an authorized notification-topic resume')
   if (report.state === 'ready' && !host.repository.state.get(KV.zentao.workflow(ticket.id))?.resolved) throw new Error('Complete test deployment, verification and ZenTao resolution before reporting ready')
   if (report.state !== 'blocked' && report.state !== 'failed') return undefined
-  const message = zentaoBlockedNotice(ticket, trigger, report.summary)
+  const message = zentaoBlockedNotice(ticket, trigger, report.summary, report.human_action === undefined ? ticket.attention?.question : report.human_action)
   host.repository.notify(message)
   return message.id
 }

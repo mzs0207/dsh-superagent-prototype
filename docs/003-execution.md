@@ -20,6 +20,18 @@ A `person` stage means the Ticket cannot continue without human input. A new hum
 
 An `idle` Ticket has finished its turn without an outstanding question. A Trigger on a subscribed Thread can continue it.
 
+### Human-intervention reminders
+
+Structured `human_action` questions are queued directly in the durable outbox, including during `progress`; delivery does not depend on another orchestrator model turn. Repeated reports of the same question reuse its receipt, and replacing or clearing a question withdraws its unsent reply. Ordinary progress remains internal.
+
+Questions use the channel of the human message that raised them, otherwise the original ticket channel. Non-question blocked/failed reports automatically notify only an existing Feishu conversation; raw launch/prepare exceptions are never automatically published as GitHub/GitLab comments. Unsent ordinary Feishu blocker notices are withdrawn when the worker moves on, receives human input, retries or ends.
+Non-question reminders share one persisted ID only while the same blocker remains active. Recovery ends that episode; a later identical blocker in the same Assignment gets a new Feishu receipt and new Session notices. Repeated reports during one episode, including after restart, still deduplicate.
+
+
+ZenTao retains its configured fixed-recipient Feishu route and per-bug topic, with full pause evidence and any concrete question; when that route is enabled, delivery failures never fall back to bug comments.
+
+The main and worker Sessions receive readable “需要你处理” notices containing the full question or blocker and how to continue. An idle Session shows them immediately; an active Session first completes its current step so a notice cannot split a tool-call/result batch. Notices persist without waking the worker or automatically retrying the task. IM reminders remain short; full details stay in the task Session.
+
 ## The Executor
 
 Each Ticket gets an Executor Session named `worker-<ticket id>` and a directory named after the Ticket's short name. Directories are created under the configured execution root, which defaults to `<stateDir>/work`.

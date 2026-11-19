@@ -27,10 +27,10 @@ export function zentaoTrigger(config: ZentaoConfig, bug: ZentaoBug): Trigger {
     channel: { source: 'zentao', thread, address: { namespace, bugId: String(bug.id), url } },
     meta: { namespace, bugId: bug.id, product: config.product, account: config.account, activatedCount: bug.activatedCount, workflow: 'zentao-bug', repository: config.repository } }
 }
-export function zentaoBlockedNotice(ticket: Ticket, trigger: Trigger, summary: string): OutboundMessage {
+export function zentaoBlockedNotice(ticket: Ticket, trigger: Trigger, summary: string, question: string | null | undefined = ticket.attention?.question): OutboundMessage {
   if (!trigger.channel || trigger.source !== 'zentao') throw new Error('A ZenTao bug channel is required')
-  return { id: key('zentao-blocked', ticket.id, latestAssignment(ticket)?.id ?? '', summary), channel: trigger.channel,
-    ticketId: ticket.id, kind: 'notice', text: `自动处理已暂停，本单不会因轮询、普通评论或服务重启自动重试。\n\n${summary}\n\n请在 Superagent 工单面板手动重试。若本通知通过飞书发送，可在原话题内补充信息；已授权的通知收件人单独回复“继续”也可恢复原任务。` }
+  return { id: key('zentao-blocked', ticket.id, latestAssignment(ticket)?.id ?? '', summary, ...question ? [question] : []), channel: trigger.channel,
+    ticketId: ticket.id, kind: 'notice', text: `自动处理已暂停，本单不会因轮询、普通评论或服务重启自动重试。\n\n${summary}${question ? `\n\n待确认：${question}` : ''}\n\n请在 Superagent 工单面板手动重试。若本通知通过飞书发送，可在原话题内补充信息；已授权的通知收件人单独回复“继续”也可恢复原任务。` }
 }
 /**
  * The pause the ticket still waits under, or undefined once it does not: a retry starts a new Assignment, whose missing

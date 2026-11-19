@@ -10,10 +10,11 @@ import type {} from '@deepseek-ai/dsh-system-prompt'
 import type {} from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-skill'
 import type {} from '@deepseek-ai/dsh-subprocess'
+import { randomUUID } from 'node:crypto'
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { lockSync } from 'proper-lockfile'
-import { Engine, key, reasonText, type EngineForSettings, type ReceiveResult, type Ticket, type Trigger } from '../core/index.ts'
+import { Engine, key, latestAssignment, reasonText, type EngineForSettings, type ReceiveResult, type Ticket, type Trigger } from '../core/index.ts'
 import { allowedSender, settingsPolicy } from '../policy.ts'
 import { SourceRegistry } from '../sources/registry.ts'
 import { Commands } from '../infra/commands.ts'
@@ -27,6 +28,7 @@ import { KV } from '../kv.ts'
 import { Store } from './store.ts'
 import { evalsHealth } from './views/overview.ts'
 import { TextCache } from './cache.ts'
+import { preview } from './views/text.ts'
 import { Effects } from './effects.ts'
 import { Prompts } from './prompts.ts'
 import { registerHttp, type HttpHost } from './http.ts'
@@ -47,6 +49,7 @@ import type { ResourceHost } from './resources.ts'
 import { mainTools, type MainToolsHost } from './tools/main.ts'
 import { executorTools, type ExecutorToolsHost } from './tools/executor.ts'
 import { receiveZentaoFollowup } from './zentao-followup.ts'
+import { zentaoBlockedNotice } from '../sources/zentao.ts'
 import { HindsightMemory } from './memory.ts'
 import { OptimizationLedger } from './optimization.ts'
 import { ManagedRemoteOps } from '../remote-ops/managed.ts'
@@ -148,6 +151,17 @@ export class Runtime extends Service implements SourceHost {
       const engine = this.engine = new Engine({ repo: store, scope: sources, policy, assessor, executor,
         outbox, prepareTicket: (ticket, outcome) => executor.prepare(ticket, outcome), emit: event => {
           optimization.domain(event)
+          if (event.type === 'assignment.reported') {
+            const signature = this.notifyIntervention(store.tickets.get(event.data.ticketId)!)
+            optimization.intervention(event.data.ticketId, event.at,
+              signature === undefined ? undefined : { signature, assignmentId: event.data.assignmentId, reason: event.data.waitReason })
+          }
+          if (event.type === 'assignment.ended' || event.type === 'ticket.ended' || event.type === 'ticket.human-input') {
+            this.withdrawIntervention(event.data.ticketId)
+          }
+          if (event.type === 'assignment.ended' || event.type === 'ticket.ended') {
+            optimization.intervention(event.data.ticketId, event.at, undefined, 'ended')
+          }
           // Notify the main Session only about domain events it did not initiate itself.
           const notice = this.quiet ? undefined : eventNotice(event, id => store.tickets.get(id))
           if (notice) sessions.notify(...notice)
@@ -211,6 +225,68 @@ export class Runtime extends Service implements SourceHost {
   idle(): Promise<void> { return this.passes.idle() }
   pump(): Promise<void> { return this.passes.pump() }
   sendReplies(): Promise<void> { return this.outbox.sent() }
+  /** Withdraw an unsent automatic blocker once work resumes, its assignment ends, or another handoff replaces it. */
+  private withdrawIntervention(ticketId: string): void {
+    const name = KV.runtime.intervention(ticketId), id = this.store.get(name)
+    if (id) {
+      this.outbox.withdraw(id)
+      this.store.delete(name)
+    }
+    this.store.delete(KV.runtime.interventionEpisode(ticketId))
+  }
+  /** Queue handoff notices and return a stable signature for measuring the underlying wait. */
+  private notifyIntervention(ticket: Ticket): string | undefined {
+    const assignment = latestAssignment(ticket), report = assignment?.report, attention = ticket.attention
+    if (!report || (!attention && report.state !== 'blocked' && report.state !== 'failed')) {
+      this.withdrawIntervention(ticket.id)
+      return
+    }
+    const action = attention?.question ?? report.summary
+    let id: string
+    let signature: string
+    if (attention) {
+      this.withdrawIntervention(ticket.id)
+      id = attention.id
+      signature = key('attention', id)
+    } else {
+      // Recovery clears this identity; repeats within the same active blocker keep it, including across restarts.
+      const name = KV.runtime.interventionEpisode(ticket.id)
+      signature = key(ticket.id, assignment!.id, report.state, report.summary)
+      let episode = this.store.get(name)
+      if (!episode || episode.signature !== signature) {
+        this.withdrawIntervention(ticket.id)
+        episode = { id: randomUUID(), signature }
+        this.store.set(name, episode)
+      }
+      id = episode.id
+    }
+    const receiptId = !attention ? key('human-intervention', id) : undefined
+    const summary = `需要你处理：${preview(action, 80)}`
+    const text = `需要你处理 · ${ticket.title}\n\n${attention ? `待确认：${attention.question}` : report.summary}`
+      + '\n\n请补充所需信息；阻塞或失败的任务也可在 Superagent 工单面板手动重试。此提醒不会自动恢复任务。'
+    for (const sessionId of [this.masterId, workerSessionId(ticket.id)]) {
+      // A failed preparation/launch may have no worker Session; never create or relaunch it just to show a notice.
+      if (sessionId !== this.masterId && !this.ctx.agents.get(sessionId as SessionId)) continue
+      this.sessions.notify(key('human-intervention', sessionId, id), text, summary, sessionId)
+    }
+    const origin = this.store.triggers.get(ticket.origin.triggerId)
+    // Retain ZenTao's full-evidence, fixed-recipient route and its existing per-bug topic/deduplication keys.
+    if (origin?.source === 'zentao' && (report.state === 'blocked' || report.state === 'failed')) {
+      this.outbox.send(zentaoBlockedNotice(ticket, origin, report.summary))
+      return signature
+    }
+    const asker = attention?.triggerId ? this.store.triggers.get(attention.triggerId) : undefined
+    const channel = asker?.channel ?? origin?.channel ?? ticket.channels[0]
+    // Unreviewed launch/prepare errors stay private: never auto-publish them to repository comments.
+    if (!channel || (!attention && channel.source !== 'feishu')) return signature
+    const brief = `${summary}\n完整内容见 Superagent 任务会话。`
+    if (attention) this.engine.reply({ purpose: 'attention', ticketId: ticket.id, question: attention.question, text: brief })
+    else {
+      this.outbox.send({ id: receiptId!, channel, ticketId: ticket.id, kind: 'notice', text: brief })
+      this.store.set(KV.runtime.intervention(ticket.id), receiptId!)
+    }
+    return signature
+  }
   private closing(): boolean { return this.closingFlag }
   /** Hold evaluation, dispatch, and outbound delivery while paused or awaiting setup; sources still record incoming triggers. */
   private paused(): boolean { return !this.setup.configured() || this.store.settings().paused }

@@ -214,6 +214,8 @@ export type AssignmentState = 'pending' | 'running' | 'ended'
  * ready (`ready`), a person must act to unblock or recover it (`blocked` or `failed`), or nothing is left to do (`dropped`).
  */
 export type ReportState = 'progress' | 'waiting' | 'ready' | 'blocked' | 'failed' | 'dropped'
+/** Optional diagnostic for a worker intervention; it never changes admission or retry policy. */
+export type WaitReason = 'approval' | 'missing-input' | 'external' | 'auth-required' | 'authentication-failed'
 /** Binding between a ticket and one executor instance. */
 export interface Assignment {
   id: string

@@ -1,7 +1,7 @@
 /** Privacy-safe runtime evidence and explicitly verified project-improvement lessons in the existing SQLite store. */
 import { z } from 'zod'
 import { randomUUID } from 'node:crypto'
-import { key, latestAssignment, type DomainEvent, type Ticket } from '../core/index.ts'
+import { key, latestAssignment, type DomainEvent, type Ticket, type WaitReason } from '../core/index.ts'
 import { KV } from '../kv.ts'
 import type { HealthEntry } from '../infra/health.ts'
 import type { Store } from './store.ts'
@@ -30,10 +30,15 @@ export interface OptimizationLesson extends LessonInput { id: string; at: string
 export interface EffectAttempt {
   id: string; kind: EffectKind; ticketId?: string; at: string; durationMs: number; status: 'succeeded' | 'failed'; error?: unknown
 }
+/** Bounded structured error facts; arbitrary names, messages, stacks and codes never enter the ledger. */
+export interface FailureDiagnostic { reason: string; name?: string; code?: string; status?: number }
+export interface FailureObservation { reason: string; errors: FailureDiagnostic[] }
 export interface OptimizationRecord {
   id: string; at: string; kind: string; component: string; status: string; reason?: string; ticket?: string; assignment?: string; durationMs?: number
+  episode?: string
   versions: { version: string; build: string; settings: number; prompts: number; workerModel: string; evalModel: string }
   verification?: { reproduction: boolean; tests: boolean; testWorktree: boolean; live: boolean; published: boolean; resolved: boolean }
+  errors?: FailureDiagnostic[]
 }
 const Query = z.object({
   since: z.iso.datetime({ offset: true }).optional(), until: z.iso.datetime({ offset: true }).optional(),
@@ -56,20 +61,49 @@ export interface OptimizationReport {
   groups: OptimizationGroup[]; caveats: string[]
 }
 const elapsed = (start: string, end: string) => Math.max(0, Date.parse(end) - Date.parse(start))
-/** Only structured provider/OS error properties are classified; free-form error text is never retained or diagnosed. */
-export function optimizationFailure(error: unknown): string {
-  const value = error as { status?: unknown; code?: unknown; name?: unknown } | null
-  if (value?.status === 429) return 'rate-limited'
-  if (value?.status === 408 || value?.name === 'TimeoutError' || value?.code === 'ETIMEDOUT') return 'timeout'
-  if (typeof value?.status === 'number' && value.status >= 500 && value.status < 600) return 'http-5xx'
-  if (['ECONNRESET', 'ECONNREFUSED', 'EAI_AGAIN', 'ENOTFOUND', 'EPIPE'].includes(String(value?.code))) return 'network'
-  return 'unknown'
+const ERROR_NAMES: Readonly<Record<string, true>> = {
+  Error: true, AggregateError: true, TypeError: true, ReferenceError: true, SyntaxError: true,
+  RangeError: true, TimeoutError: true, AbortError: true,
+}
+const ERROR_CODES: Readonly<Record<string, string>> = {
+  ETIMEDOUT: 'timeout', ECONNRESET: 'network', ECONNREFUSED: 'network', EAI_AGAIN: 'network', ENOTFOUND: 'network', EPIPE: 'network',
+  PREPARE_FAILED: 'prepare-failed', SUBAGENT_CATALOG_UNAVAILABLE: 'catalog-unavailable',
+  AUTH: 'authentication-failed',
+}
+/** Follow causes and aggregates, retaining at most eight allowlisted diagnostics and never free-form error text. */
+export function optimizationFailure(error: unknown): FailureObservation {
+  const errors: FailureDiagnostic[] = [], seen = new Set<unknown>()
+  const visit = (value: unknown): void => {
+    if (!value || typeof value !== 'object' || seen.has(value) || errors.length === 8) return
+    seen.add(value)
+    const row = value as { name?: unknown; code?: unknown; status?: unknown; message?: unknown; cause?: unknown; errors?: unknown }
+    const name = typeof row.name === 'string' && Object.hasOwn(ERROR_NAMES, row.name) ? row.name : undefined
+    const login = row.message === 'ChatGPT sign-in needs to be renewed'
+    const code = typeof row.code === 'string' && Object.hasOwn(ERROR_CODES, row.code) ? row.code : undefined
+    const status = typeof row.status === 'number' && Number.isInteger(row.status) && row.status >= 400 && row.status <= 599 ? row.status : undefined
+    let reason = code ? ERROR_CODES[code]! : 'unknown'
+    if (login) reason = 'auth-required'
+    else if (status === 401 || code === 'AUTH') reason = 'authentication-failed'
+    else if (status === 429) reason = 'rate-limited'
+    else if (status === 408 || name === 'TimeoutError') reason = 'timeout'
+    else if (status && status >= 500) reason = 'http-5xx'
+    else if (reason === 'unknown' && name === 'TypeError') reason = 'type-error'
+    errors.push({ reason, ...(name ? { name } : {}), ...(code ? { code } : {}), ...(status ? { status } : {}) })
+    visit(row.cause)
+    if (Array.isArray(row.errors)) for (const child of row.errors) { if (errors.length === 8) break; visit(child) }
+  }
+  visit(error)
+  const specific = errors.find(row => row.reason === 'auth-required')
+    ?? errors.find(row => row.reason === 'authentication-failed')
+    ?? errors.find(row => row.reason !== 'unknown' && row.reason !== 'type-error')
+  return { reason: specific?.reason ?? errors.find(row => row.reason !== 'unknown')?.reason ?? 'unknown', errors }
 }
 
 /** Passive, savepoint-isolated observations; no raw source payload, report, error, model output or identity is stored. */
 export class OptimizationLedger {
   private available = false
   private prunedAt = 0
+  private readonly failedCommits = new WeakSet<object>()
   constructor(private readonly store: Store, private readonly health: HealthEntry,
     private readonly retain: (lesson: OptimizationLesson) => void, private readonly now = () => Date.now()) {
     this.observe(() => {
@@ -78,7 +112,8 @@ export class OptimizationLedger {
         CREATE TABLE IF NOT EXISTS optimization_lesson (id TEXT PRIMARY KEY, at TEXT NOT NULL, value TEXT NOT NULL);
         CREATE INDEX IF NOT EXISTS optimization_lesson_at ON optimization_lesson(at, id)`)
       if (!store.get(KV.optimization.startedAt)) store.set(KV.optimization.startedAt, new Date(this.now()).toISOString())
-      this.prune(); this.store.afterCommit(() => { this.available = true })
+      this.prune()
+      this.store.afterCommit(batch => { this.available = true; this.ready(batch) })
     })
   }
   /** Runs inside the domain transaction, so rolled-back commands cannot leave observations behind. */
@@ -111,15 +146,34 @@ export class OptimizationLedger {
   effect(attempt: EffectAttempt): void {
     this.observe(() => { this.insert({ id: attempt.id, at: attempt.at, kind: 'effect-attempt', component: attempt.kind, status: attempt.status,
       durationMs: attempt.durationMs, ...(attempt.ticketId ? { ticket: key(attempt.ticketId) } : {}),
-      ...(attempt.status === 'failed' ? { reason: optimizationFailure(attempt.error) } : {}) }) })
+      ...(attempt.status === 'failed' ? optimizationFailure(attempt.error) : {}) }) })
   }
   workerRetry(ticketId: string, assignmentId: string, error: unknown, id: string): void {
     this.observe(() => { this.insert({ id: key('worker-retry', id), at: new Date(this.now()).toISOString(), kind: 'worker-retry',
-      component: 'execution', status: 'scheduled', ticket: key(ticketId), assignment: key(assignmentId), reason: optimizationFailure(error) }) })
+      component: 'execution', status: 'scheduled', ticket: key(ticketId), assignment: key(assignmentId), ...optimizationFailure(error) }) })
   }
-  workerFailure(ticketId: string, component: 'prepare' | 'launch' | 'execution', error: unknown): void {
+  workerFailure(ticketId: string | undefined, component: 'prepare' | 'launch' | 'execution' | 'cleanup' | 'background', error: unknown): void {
     this.observe(() => { this.insert({ id: randomUUID(), at: new Date(this.now()).toISOString(), kind: 'worker-failure',
-      component, status: 'failed', ticket: key(ticketId), reason: optimizationFailure(error) }) })
+      component, status: 'failed', ...(ticketId ? { ticket: key(ticketId) } : {}), ...optimizationFailure(error) }) })
+  }
+  /** A reissued notice does not restart the underlying wait. Only a different signature or assignment does. */
+  intervention(ticketId: string, at: string, active?: { signature: string; assignmentId: string; reason?: WaitReason },
+    end: 'cleared' | 'ended' = 'cleared'): void {
+    if (!this.available) return
+    this.observe(() => {
+      const ticket = key(ticketId), name = KV.optimization.pendingWait(ticket), previous = this.store.get(name)
+      const assignment = active && key(active.assignmentId)
+      if (previous?.signature === active?.signature && previous?.assignment === assignment) return
+      const base = { kind: 'blocker-wait', component: 'execution', ticket, at }
+      if (previous) this.insert({ ...base, id: key(base.kind, previous.episode, 'end'), episode: previous.episode,
+        assignment: previous.assignment, reason: previous.reason, status: active ? 'replaced' : end,
+        durationMs: elapsed(previous.at, at) })
+      if (!active || !assignment) { this.store.delete(name); return }
+      const episode = key(randomUUID()), reason = active.reason ?? 'unknown'
+      const next = { episode, signature: active.signature, assignment, reason, at }
+      this.insert({ ...base, episode, assignment, reason, id: key(base.kind, episode, 'start'), status: 'started' })
+      this.store.set(name, next)
+    })
   }
   humanInput(ticketId: string, inputId: string): void {
     this.observe(() => { this.insert({ id: key('human-input', ticketId, inputId), at: new Date(this.now()).toISOString(), kind: 'human-input',
@@ -136,7 +190,9 @@ export class OptimizationLedger {
     const settings = this.store.settings()
     const versions = { version, build, settings: this.store.get(KV.settings.revision) ?? 0, prompts: this.store.get(KV.prompts.revision) ?? 0,
       workerModel: key(JSON.stringify(settings.executor.model)), evalModel: key(JSON.stringify(settings.eval.model)) }
-    this.store.db.prepare('INSERT OR IGNORE INTO optimization_record VALUES (?, ?, ?)').run(record.id, record.at, JSON.stringify({ ...record, versions }))
+    const result = this.store.db.prepare('INSERT OR IGNORE INTO optimization_record VALUES (?, ?, ?)')
+      .run(record.id, record.at, JSON.stringify({ ...record, versions }))
+    if (result.changes) this.store.afterCommit(batch => { this.ready(batch) })
   }
   private prune(): void {
     const now = this.now()
@@ -145,12 +201,19 @@ export class OptimizationLedger {
     this.store.db.prepare('DELETE FROM optimization_record WHERE at < ?').run(new Date(now - RETENTION_MS).toISOString())
     this.store.afterCommit(() => { this.prunedAt = now })
   }
+  private ready(batch?: object): void {
+    if (batch && this.failedCommits.has(batch)) return
+    this.health.set({ state: 'ready', detail: 'Privacy-safe optimization recording is ready' })
+  }
   private observe(run: () => void): void {
     try {
       this.store.atomic(run)
-      this.store.afterCommit(() => { if (this.available) this.health.set({ state: 'ready', detail: 'Privacy-safe optimization recording is ready' }) })
     } catch {
-      this.store.afterCommit(() => { this.health.set({ state: 'error', detail: 'Optimization evidence could not be recorded; task behavior is unchanged' }) })
+      this.store.afterCommit(batch => {
+        // A successful sibling observation must not hide records lost in this same commit.
+        if (batch) this.failedCommits.add(batch)
+        this.health.set({ state: 'error', detail: 'Optimization evidence could not be recorded; task behavior is unchanged' })
+      })
     }
   }
   private window(query: OptimizationQuery) {

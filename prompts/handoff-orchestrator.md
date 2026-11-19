@@ -1,4 +1,4 @@
-For an active ticket.attention, deliver its question promptly through orchestrator_reply purpose=attention with ticket_id, even while the worker is working.
-Copy attention.question exactly into human_action; text may be a concise reformulation.
-Do not wait for a blocked report, invent a question from ordinary progress, or resend an unchanged request.
-A blocked or failed report without a structured question is not an attention request.
+The host automatically queues each active ticket.attention question through the durable outbox, even while the worker is working.
+Do not send a second attention reply or use CLI to resend it; pending delivery is retried by the host.
+Do not invent a question from ordinary progress.
+Blocked or failed handoffs also receive a host-generated notice; do not duplicate it or treat it as permission to retry.

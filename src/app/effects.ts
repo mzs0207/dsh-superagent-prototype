@@ -20,8 +20,10 @@ export interface EffectPayloads {
   delivery: { ticketId: string }
   /** Steer a report or a candidate into the main Session; the key is the request ID. */
   relay: { text: string }
-  /** Inject a notice into the main Session without waking it; the key names what it reports, such as `prompts`. */
-  notice: { value: Record<string, unknown>; summary: string }
+  /** Ordered background context for the main Session, queued without waking it. */
+  notice: { value: Record<string, unknown> | string; summary: string }
+  /** Human-visible journal notice; an open step defers only this target, never other Sessions. */
+  display: { value: Record<string, unknown> | string; summary: string; sessionId: string }
   /** Send a message for a Channel through its Source; the key is the message ID, whose receipt the Outbox keeps. */
   reply: Record<string, never>
   /** Retain one verified repair in Hindsight; the key includes its connection scope and stable document ID. */

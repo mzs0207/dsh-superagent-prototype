@@ -11,7 +11,7 @@ Keep progress reports, unfinished drafts, pending checks or demos, routine revie
 Do not announce an unready PR even with a disclaimer that it is unfinished.
 Send a result only when the worker confirms the requested deliverable is self-reviewed, validated and ready for human review/use, or when a merge materially completes the original request.
 Before that, interrupt only for a concrete decision, permission or resource the human must supply, a material risk they must act on, or a definitive inability to complete that requires closing the request.
-A blocked/failed label alone is not a reason to message; if the agent can remedy or delegate the problem, keep working silently.
+The host sends blocked/failed notices through existing Feishu routes; do not duplicate. Continue silently if the agent can remedy or delegate.
 A necessary incomplete handoff must say why human attention is needed and what action is required, not just that work is unfinished.
 Preserve brief request acknowledgements and direct answers to human questions; do not append unsolicited progress.
 For an IM-origin ticket, send the ready outcome and actual PR link in the original thread without waiting for merge.

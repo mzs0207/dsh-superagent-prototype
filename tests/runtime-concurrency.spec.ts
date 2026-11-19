@@ -205,7 +205,9 @@ it('lets a worker go on after a passing provider failure, three times, before it
   expect(latestAssignment(ticket())?.report).toBeUndefined()
   // The fourth passing failure fails the ticket, as any other failure does at once.
   fail(busy)
-  await vi.waitFor(() => expect(latestAssignment(ticket())?.report).toMatchObject({ state: 'failed', summary: expect.stringContaining('Service Unavailable') }))
+  await vi.waitFor(() => expect(latestAssignment(ticket())?.report).toMatchObject({
+    state: 'failed', summary: expect.stringContaining('Worker execution failed (http-5xx)'),
+  }))
 })
 describe('a worker that goes on after a passing failure', () => {
   const busy = () => Object.assign(new Error('Service Unavailable'), { status: 503 })
@@ -295,11 +297,11 @@ describe('a worker whose work runs in the background', () => {
     const job = h.jobs.run(one.sessionId), child = h.subagents.spawn(one.sessionId)
     h.runtime.engine.stopTicket(one.ticket.id)
     await vi.waitFor(() => expect(h.jobs.service.kill).toHaveBeenCalledWith(job, one.sessionId, expect.any(String)))
-    await vi.waitFor(() => expect(h.subagents.service.drainChildren).toHaveBeenCalledWith(agent, [child]))
+    await vi.waitFor(() => expect(h.subagents.live(child)).toBe(false))
     // The kill's end released the stop's own wait, which is how DSH tells the worker's job tools it was collected; the
     // released subagent's end, which DSH delivers before the release returns, is dropped with the turn it woke.
     expect(h.jobs.released).toBe(1)
-    await vi.waitFor(() => expect(agent.cancel.mock.invocationCallOrder.at(-1)).toBeGreaterThan(h.subagents.service.drainChildren.mock.invocationCallOrder[0]!))
+    await vi.waitFor(() => expect(agent.cancel.mock.invocationCallOrder.at(-1)).toBeGreaterThan(h.subagents.service.interrupt.mock.invocationCallOrder[0]!))
     expect(agent.cancel).toHaveBeenLastCalledWith({ kind: 'user' }, { keepInbox: false })
     // Its Session still admits subagents, as when the ticket resumes.
     expect(() => h.subagents.spawn(one.sessionId)).not.toThrow()
@@ -506,17 +508,17 @@ describe('a worker whose work runs in the background', () => {
     const one = await h.acceptedTicket(feishu('1', '@bot 修一'))
     const agent = h.agents.get(one.sessionId)!
     h.runtime.engine.bindThread(one.ticket.id, { source: 'github', id: '7' }, true)
-    h.subagents.spawn(one.sessionId)
+    const child = h.subagents.spawn(one.sessionId)
     await h.runTool(one.sessionId, 'orchestrator_report', { state: 'ready', summary: 'PR ready' }); await h.runtime.idle()
     // A person's message is on its way into the worker's Session, held there, as the worker hands off; the release is slow.
-    const session = deferred(), drain = deferred(), release = h.subagents.service.drainChildren.getMockImplementation()!
-    h.subagents.service.drainChildren.mockImplementationOnce(async (parent, ids) => { await drain.promise; await release(parent, ids) })
+    const session = deferred(), drain = deferred()
+    Object.assign(h.agents.get(child)!, { whenIdle: () => drain.promise })
     await new Promise(resolve => setTimeout(resolve, 5))
     const held = holdSession(one.sessionId, session.promise)
     h.runtime.receive(feishu('2', '按钮再大一点', { mentions: [], root_id: 'om_1' }))
     await vi.waitFor(() => expect(held()).toBe(true))
     idle(one.sessionId)
-    await vi.waitFor(() => expect(h.subagents.service.drainChildren).toHaveBeenCalled())
+    await vi.waitFor(() => expect(h.subagents.service.interrupt).toHaveBeenCalled())
     session.resolve()
     await new Promise(resolve => setTimeout(resolve, 20))
     drain.resolve()
@@ -532,9 +534,9 @@ describe('a worker whose work runs in the background', () => {
     idle(one.sessionId)
     await vi.waitFor(() => expect(latestAssignment(ticket())?.report?.state).toBe('waiting'))
     // A subagent still runs, whose release is slow; one Input waits in the Session's inbox, another in the ticket.
-    h.subagents.spawn(one.sessionId)
-    const gate = deferred(), drain = h.subagents.service.drainChildren.getMockImplementation()!
-    h.subagents.service.drainChildren.mockImplementationOnce(async (parent, ids) => { await gate.promise; await drain(parent, ids) })
+    const child = h.subagents.spawn(one.sessionId)
+    const gate = deferred()
+    Object.assign(h.agents.get(child)!, { whenIdle: () => gate.promise })
     agent.inbox.nextStep.push({ id: 'taken-later', role: 'user', content: [{ type: 'text', text: 'Handed over' }], source: { kind: 'user' } } as never)
     const stored = ticket()
     stored.inputs.push({ id: 'input-late', kind: 'text', text: 'One more thing', at: new Date().toISOString() })
@@ -589,10 +591,10 @@ describe('a worker whose work runs in the background', () => {
     const two = await h.acceptedTicket(feishu('5', '@bot 修二'))
     const other = h.agents.get(two.sessionId)!
     const child = h.subagents.spawn(two.sessionId)
-    h.subagents.service.drainChildren.mockImplementationOnce(async () => { h.subagents.settle(child); throw new Error('ACTIVATION_TEARDOWN_FAILED') })
+    h.subagents.service.interrupt.mockImplementationOnce(() => { h.subagents.settle(child); throw new Error('ACTIVATION_TEARDOWN_FAILED') })
     h.runtime.engine.stopTicket(two.ticket.id)
-    await vi.waitFor(() => expect(h.subagents.service.drainChildren).toHaveBeenCalled())
-    await vi.waitFor(() => expect(other.cancel.mock.invocationCallOrder.at(-1)).toBeGreaterThan(h.subagents.service.drainChildren.mock.invocationCallOrder.at(-1)!))
+    await vi.waitFor(() => expect(h.subagents.service.interrupt).toHaveBeenCalled())
+    await vi.waitFor(() => expect(other.cancel.mock.invocationCallOrder.at(-1)).toBeGreaterThan(h.subagents.service.interrupt.mock.invocationCallOrder.at(-1)!))
   })
   it('stops the jobs and the turn of a worker a restart in this process left running, before its Assignment starts again', async () => {
     const one = await h.acceptedTicket(feishu('1', '@bot 修一'))
@@ -609,8 +611,8 @@ describe('a worker whose work runs in the background', () => {
     const queued = await h.acceptedTicket(feishu('5', '@bot 修二'))
     expect(h.agents.has(queued.sessionId)).toBe(false)
     // DSH cannot list the children of a Session that does not exist.
-    const list = h.subagents.service.listChildren.getMockImplementation()!
-    h.subagents.service.listChildren.mockImplementation(async (id: string) => {
+    const list = h.subagents.service.listDescendants.getMockImplementation()!
+    h.subagents.service.listDescendants.mockImplementation(async (id: string) => {
       if (id === queued.sessionId) throw new Error('SESSION_QUERY_SESSION_NOT_FOUND')
       return list(id)
     })
@@ -940,4 +942,16 @@ describe('the Executor\'s parts', () => {
     expect(ready.id).toMatch(/^report:/)
     expect(JSON.parse(ready.text)).toMatchObject({ kind: 'worker_report', ticket: { ticket_id: 't1' }, trigger_id: 'tr1', state: 'ready', answer_to: 'tr9', summary: 'Done' })
   })
+})
+
+it('stops grandchildren with their worker without stopping another worker or closing future child admission', async () => {
+  const one = await h.acceptedTicket(feishu('recursive1', 'First repair'))
+  const two = await h.acceptedTicket(feishu('recursive2', 'Independent repair'))
+  const child = h.subagents.spawn(one.sessionId), grandchild = h.subagents.spawn(child)
+  const other = h.subagents.spawn(two.sessionId)
+  h.runtime.engine.stopTicket(one.ticket.id)
+  await vi.waitFor(() => expect([h.subagents.live(child), h.subagents.live(grandchild)]).toEqual([false, false]))
+  expect(h.subagents.live(other)).toBe(true)
+  const next = h.subagents.spawn(one.sessionId)
+  expect(h.subagents.live(next)).toBe(true)
 })

@@ -242,7 +242,7 @@ scripts/dsh-superagent status
 
 `status` prints process ids, health and setup problems. For a different profile or port, use `--profile` and `--url`, or set `DSH_SUPERAGENT_PROFILE` and `DSH_SUPERAGENT_URL`.
 
-`status`, `start` and `restart` exit with one of four codes:
+`status`, `start`, `restart` and `recover` exit with one of four codes:
 
 | Code | Meaning |
 | --- | --- |
@@ -271,6 +271,14 @@ Check dsh-superagent: run `scripts/dsh-superagent --profile superagent status` i
 ```
 
 `--respect-stop` preserves an intentional stop. Only `stop` writes the marker; `start` clears it. `restart` writes no marker, so the check can recover a restart whose shutdown timed out.
+
+### Windows-hosted WSL recovery
+
+An in-WSL schedule cannot recover a stopped WSL instance. Run the desktop launcher from Windows Task Scheduler under the user who owns the distribution, at sign-in and periodically. The local launcher's non-interactive `recover` mode checks the stop marker, calls `scripts/dsh-superagent recover --stop-timeout 90`, then rechecks the marker and probes the configured mobile gateway independently. It starts a missing gateway without opening the browser.
+
+`recover` starts a missing main service, or gracefully restarts a single unchanged DSH process after two failed runtime checks. An unavailable management endpoint is not treated as a restart signal during the process's first `--timeout` seconds (60 by default) or if its age cannot be verified. Recovery leaves healthy, still-starting, setup-blocked and source-error processes alone, refuses duplicates, and never force-kills. An unresponsive mobile process is not killed automatically.
+
+The local `DSH Superagent Recovery` task runs at sign-in and every five minutes while that Windows user remains signed in. It does not store a password or wake the computer. Read the last result with `Get-ScheduledTaskInfo -TaskName 'DSH Superagent Recovery'`; disable the scheduled task to stop periodic checks, or use the normal launcher `stop` to keep the profile intentionally stopped until the next explicit start.
 
 ## Settings
 
@@ -358,9 +366,17 @@ curl -s -X PUT -H 'x-orchestrator-request: 1' -H 'content-type: application/json
 Rebuild and restart DSH to activate automatic recording; no APK/mobile-gateway upgrade or additional service is required. The ledger uses the existing private `<stateDir>/orchestrator.sqlite`. Runtime evidence is kept for 90 days, pruned at startup/on writes at most hourly, and excluded from queries once expired. Authored lessons remain independently of that retention. There is no historical backfill; recorder-error intervals have incomplete evidence.
 If recorder initialization fails, its health remains `error`; later events cannot mark an uninitialized recorder ready. Fix the storage problem and restart DSH to initialize recording again. Task execution is not blocked.
 
-Recorded facts: task/assignment lifecycle, worker report states, explicit retries, human input/resumption, scheduled worker retries, actual effect success/failure, and terminal prepare/launch/execution failure boundaries. Structured OS/provider properties yield `timeout`, `network`, `rate-limited` or `http-5xx`; otherwise the reason is `unknown`. `Later` holds (pause, worker slots, earlier messages) are not failures. No raw task titles, chats/reports, tool output, errors, accounts, recipients or credentials are copied.
+Recorded facts: task/assignment lifecycle, worker report states, explicit retries, human input/resumption, scheduled worker retries, actual effect success/failure, and prepare/launch/execution/background/cleanup failure boundaries. Failed observations include up to eight allowlisted diagnostics from nested `cause` / `AggregateError.errors`: error type, recognized OS/application code and HTTP status. Reasons include `timeout`, `network`, `rate-limited`, `http-5xx`, `type-error`, `prepare-failed` and `catalog-unavailable`; unrecognized facts remain `unknown`. Cycles and oversized chains are bounded. Worker health shows the same safe internal diagnostic chain; historical records are not backfilled. `Later` holds (pause, worker slots, earlier messages) are not failures. No raw task titles, chats/reports, tool output, error messages/stacks, accounts, recipients or credentials are copied.
+
+The recognized Codex login-renewal error is `auth-required`; other HTTP 401 or structured `AUTH` errors are `authentication-failed`. Only the former prompts sign-in again. Generic authentication failures prompt a check of startup credentials or model provider credentials, depending on where they occurred. Neither schedules a Worker retry or changes models. The ledger never stores error messages. A write failure takes precedence over other writes in the same commit; only a new record committed in a later transaction without errors clears recorder health `error`.
+
+Automatic Worker startup and execution failure reports contain a classification and an operator action, not raw exception text. This also keeps host error messages out of automatic Feishu and ZenTao notices.
+
+When a workspace prepare command fails before a Worker Session exists, inspect `<stateDir>/prepare-failure.json` on the host. This owner-only (`0600`) file holds the ticket ID, timestamp and up to 16,384 code units of the most recently saved diagnostic. It is overwritten by the next prepare failure and is not exposed through management, mobile, notices or the optimization ledger. Its text may contain credentials or local paths; do not share it unredacted.
 
 Records include hashed correlation keys, timestamps, duration, application version/build timestamp, settings/prompt revisions, model-configuration fingerprints and checkpoint-presence flags. Hashes are pseudonyms, not guaranteed anonymization. Checkpoint flags mean evidence was recorded, not that arbitrary text proves success. Task-end durations include waiting since creation; assignment-start durations measure launch wait; effect durations cover one attempt. These overlap: do not sum them or call them model time/token cost. `explicit-retry` can originate in the panel, an authorized follow-up or the main agent; human inputs/resumptions are separate observations, not distinct people.
+
+`blocker-wait` records link a `started` row and a closing row through a hashed `episode` scoped to an assignment. Repeating the same intervention does not reset its start, even if a follow-up caused the notice to be reissued. Closure is `cleared` when a report clears the wait, `replaced` when a different intervention supersedes it, or `ended` when the assignment or ticket ends. Closing rows include elapsed wall time, not necessarily time the worker was idle. The ledger stores only the reason category (`approval`, `missing-input`, `external`, `auth-required`, `authentication-failed`, `unknown`), never the question or summary.
 
 ```sh
 scripts/dsh-superagent optimization

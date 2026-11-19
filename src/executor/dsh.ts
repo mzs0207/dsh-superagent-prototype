@@ -2,7 +2,8 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { mkdir, rmdir, stat } from 'node:fs/promises'
+import { randomUUID } from 'node:crypto'
+import { mkdir, rename, rm, rmdir, stat, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { key, latestAssignment, latestReport, liveTicket, runningAssignment, threadKey, waitsForPerson } from '../core/index.ts'
 import type { AssessmentOutcome, Assignment, EngineForExecutor, Execution, Executor, Mandate, PolicyEffect, Ticket, TicketInput, Trigger }
@@ -18,7 +19,7 @@ import { WorktreeNameSchema } from '../app/assessment.ts'
 import { resultRelay } from '../app/notices.ts'
 import type { HealthEntry } from '../infra/health.ts'
 import type { HindsightMemory } from '../app/memory.ts'
-import type { OptimizationLedger } from '../app/optimization.ts'
+import { optimizationFailure, type OptimizationLedger } from '../app/optimization.ts'
 import { cancelled, collectJob, killJobs, runningJobs, stopBackground, stopSubagents, until, untilQuiet } from './background.ts'
 
 const now = (): string => new Date().toISOString()
@@ -42,18 +43,27 @@ const fromPerson = (input?: TicketInput): boolean => input?.kind === 'trigger' ?
  * Internal error thrown when a ticket's workspace prepare command fails during launch.
  * DshExecutor catches it to mark the ticket failed immediately rather than retrying automatically, because an existing directory counts as prepared and an automatic retry would treat whatever a failed prepare command left behind in the directory as a prepared workspace.
  */
-class PrepareFailed extends Error {}
+class PrepareFailed extends Error { readonly code = 'PREPARE_FAILED' }
 const PASSING = new RegExp(['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'EAI_AGAIN', 'ENOTFOUND', 'EPIPE', 'UND_ERR', 'socket hang up', 'fetch failed',
   'network error', 'overloaded', 'rate limit', '\\b(?:408|429|50[0-4])\\b'].join('|'), 'i')
+const RENEW_LOGIN = 'Model sign-in needs to be renewed. Sign in again, then retry the ticket.'
+const CHECK_CREDENTIALS = 'Model authentication failed. Check the model provider credentials, then retry the ticket.'
 /**
  * True when an error represents a transient network or model-provider failure: an HTTP 408, 429, or 5xx status, or a
  * connection that was refused, reset, timed out, or could not resolve its host.
  */
 export function transient(error: unknown): boolean {
-  const status = (error as { status?: unknown } | undefined)?.status
-  if (typeof status === 'number') return status === 408 || status === 429 || status >= 500
-  const text = error instanceof Error ? `${error.name} ${error.message} ${String((error as { code?: unknown }).code ?? '')}` : String(error)
-  return PASSING.test(text)
+  const status = error && typeof error === 'object' && 'status' in error ? error.status : undefined
+  if (typeof status === 'number') {
+    const passing = status === 408 || status === 429 || status >= 500
+    if (!passing) return false
+  } else {
+    const code = error instanceof Error && 'code' in error ? error.code : undefined
+    const text = error instanceof Error ? `${error.name} ${error.message} ${String(code ?? '')}` : String(error)
+    if (!PASSING.test(text)) return false
+  }
+  const { reason } = optimizationFailure(error)
+  return reason !== 'auth-required' && reason !== 'authentication-failed'
 }
 /** Appends a stable 12-character ticket ID suffix to a validated English worktree name. */
 const ticketWorktreeName = (name: string, id: string): string => `${WorktreeNameSchema.parse(name)}-${id.slice(0, 12)}`
@@ -248,7 +258,7 @@ export class DshExecutor implements Executor {
    * Runs the configured `executor.prepare` command for a new ticket workspace in its parent directory with the ticket's
    * execution environment variables, then verifies the directory as the worker sees it.
    * A failed prepare command throws `PrepareFailed`, which is not retried automatically; an empty directory it left is removed, a non-empty one kept.
-   * @throws PrepareFailed with the command's output when the prepare command fails.
+   * @throws PrepareFailed after saving a private local diagnostic, if possible.
    */
   private async prepareDirectory(ticket: Ticket): Promise<void> {
     const directory = ticket.execution?.directory ?? ''
@@ -261,10 +271,25 @@ export class DshExecutor implements Executor {
       .catch(async (error: unknown) => {
         // Remove an empty directory left by a failed prepare command so a later retry does not treat it as already prepared.
         await rmdir(directory).catch(() => { /* Absent, or holding what the command wrote, which the output explains. */ })
-        throw new PrepareFailed(`The prepare command failed: ${error instanceof Error ? error.message : String(error)}`)
+        const detail = error instanceof Error ? error.message : String(error)
+        if (!this.host.closing()) await this.savePrepareFailure(ticket.id, detail)
+        throw new PrepareFailed('The workspace prepare command failed.')
       })
     await mkdir(directory, { recursive: true })
     await verifyDirectory(directory, this.host.context.subprocess, this.host.lifetime)
+  }
+  /** Store only the last prepare failure; raw command diagnostics never become a ticket report or outgoing message. */
+  private async savePrepareFailure(ticketId: string, detail: string): Promise<void> {
+    const path = join(this.host.machine.stateDir, 'prepare-failure.json')
+    const temporary = `${path}.${randomUUID()}.tmp`
+    try {
+      await writeFile(temporary, JSON.stringify({ ticketId, at: now(), detail: detail.slice(0, 16_384) }) + '\n',
+        { mode: 0o600, flag: 'wx' })
+      await rename(temporary, path)
+    } catch {
+      await rm(temporary, { force: true }).catch(() => {})
+      this.host.context.logger.warn('Could not save the private workspace prepare diagnostic')
+    }
   }
   /** Enqueues a `launch` effect for an accepted or resumed assignment; launches start in queue order as worker slots free up. */
   start(ticket: Ticket, assignment: Assignment): void {
@@ -383,7 +408,7 @@ export class DshExecutor implements Executor {
     const entry: Promise<void> = Promise.all([this.stopping.get(ticketId), stop.catch(() => {})]).then(() => {})
       .finally(() => { if (this.stopping.get(ticketId) === entry) this.stopping.delete(ticketId) })
     this.stopping.set(ticketId, entry)
-    void this.background(stop)
+    void this.background(stop, ticketId, 'cleanup')
   }
   /** Wait for a stop of the ticket's background work that runs, unless the host stops first. */
   private async stopped(ticketId: string): Promise<void> {
@@ -398,7 +423,8 @@ export class DshExecutor implements Executor {
     const agents = this.host.store.tickets.list().map(ticket => this.host.context.agents.get(workerSessionId(ticket.id) as SessionId))
       .filter((agent): agent is Agent => agent !== undefined)
     const stop = async () => {
-      await Promise.allSettled(agents.map(agent => stopBackground(this.host.context, agent.id, 'dsh-superagent stopped', true)))
+      await Promise.all(agents.map(agent => this.background(
+        stopBackground(this.host.context, agent.id, 'dsh-superagent stopped', true), ticketOfSession(agent.id), 'cleanup')))
       for (const { collect } of this.left.values()) collect.abort()
       const running = agents.filter(agent => agent.status !== 'idle')
       for (const agent of running) agent.cancel({ kind: 'user' }, { keepInbox: true })
@@ -418,12 +444,25 @@ export class DshExecutor implements Executor {
     const ticket = this.host.store.tickets.get(ticketId)
     if (!ticket || !liveTicket(ticket) || latestAssignment(ticket)?.id !== assignmentId) return
     this.host.optimization?.workerFailure(ticketId, error instanceof PrepareFailed ? 'prepare' : 'launch', error)
-    this.failed(ticketId, String(error))
+    this.failed(ticketId, error, 'startup')
   }
   /** Records a `failed` report on the ticket and relays the failure to the main Session in one transaction. */
-  private failed(ticketId: string, summary: string): void {
+  private failed(ticketId: string, error: unknown, phase: 'startup' | 'execution' = 'execution'): void {
+    const { reason } = optimizationFailure(error)
+    let summary: string
+    if (reason === 'auth-required') summary = RENEW_LOGIN
+    else if (reason === 'authentication-failed') {
+      summary = phase === 'startup'
+        ? 'Worker startup authentication failed. Check the credentials used during worker startup, then retry the ticket.'
+        : CHECK_CREDENTIALS
+    } else {
+      // The report is forwarded outside the host; exception text can contain credentials and local paths.
+      const inspect = phase === 'startup' ? 'workspace preparation and worker setup' : 'the worker session'
+      summary = `Worker ${phase} failed (${reason}). Check ${inspect}, then retry the ticket.`
+    }
+    const waitReason = reason === 'auth-required' || reason === 'authentication-failed' ? reason : undefined
     this.host.store.atomic(() => {
-      const updated = this.host.engine.report(ticketId, { state: 'failed', summary })
+      const updated = this.host.engine.report(ticketId, { state: 'failed', summary, ...(waitReason ? { waitReason } : {}) })
       this.relay(resultRelay(updated, 'failed', summary))
     })
   }
@@ -492,7 +531,7 @@ export class DshExecutor implements Executor {
       if (status !== 'idle' || cancelled.delete(agent) || this.host.closing()) return
       const ticket = this.ticketOf(agent)
       const assignment = ticket && runningAssignment(ticket)
-      if (ticket && assignment && liveTicket(ticket)) void this.background(this.workerIdle(ticket, assignment, agent))
+      if (ticket && assignment && liveTicket(ticket)) void this.background(this.workerIdle(ticket, assignment, agent), ticket.id)
     }))
     // A person's message typed into a worker's Session, which the ticket does not record.
     this.disposers.push(ctx.on('agent/inbox/claimed', ({ agent, message }) => {
@@ -512,7 +551,7 @@ export class DshExecutor implements Executor {
         const read = this.host.store.tickets.get(ticketId)?.inputs.filter(input => input.kind === 'trigger' && !input.readAt
           && this.host.sessions.promptedId(input.id) === message.id).map(input => input.id) ?? []
         if (read.length) this.host.engine.inputsRead(ticketId, read)
-      }))
+      }), ticketId)
     }))
     this.disposers.push(ctx.on('agent/error', ({ agent, error }) => {
       const ticket = this.ticketOf(agent)
@@ -520,7 +559,7 @@ export class DshExecutor implements Executor {
       if (!ticket || !assignment || !liveTicket(ticket) || this.host.closing()) return
       if (this.retries(assignment.id, error)) { this.resumeAfter(ticket.id, assignment.id, error); return }
       this.host.optimization?.workerFailure(ticket.id, 'execution', error)
-      void this.background(Promise.resolve().then(() => { this.failed(ticket.id, String(error)) }))
+      void this.background(Promise.resolve().then(() => { this.failed(ticket.id, error) }), ticket.id)
     }))
   }
   /** Unsubscribes from host agent events and clears any pending transient-retry timers. */
@@ -549,10 +588,15 @@ export class DshExecutor implements Executor {
     }
   }
   /** Runs background worker event handling and updates the `worker` health entry on failure or recovery. */
-  private background(work: Promise<void>): Promise<void> {
-    const { health } = this.host
+  private background(work: Promise<void>, ticketId?: string, component: 'cleanup' | 'background' = 'background'): Promise<void> {
+    const { health, optimization } = this.host
     return work.then(() => { if (health.get()?.state === 'error') health.set({ state: 'ready', detail: 'Worker events are handled', at: now() }) },
-      (error: unknown) => { health.set({ state: 'error', detail: String(error), at: now() }) })
+      (error: unknown) => {
+        optimization?.workerFailure(ticketId, component, error)
+        const diagnostics = optimizationFailure(error).errors.map(row =>
+          [row.name ?? 'Error', row.code ?? row.status, `(${row.reason})`].filter(value => value !== undefined).join(' ')).join(' ← ')
+        health.set({ state: 'error', detail: `Worker ${component} failed: ${diagnostics || 'unknown'}`, at: now() })
+      })
   }
   /**
    * Checks whether `error` is a transient failure with retry attempts remaining under `key`, mutating `this.transient`:
@@ -584,7 +628,7 @@ export class DshExecutor implements Executor {
       }
       const sent = this.host.sessions.prompt(sessionId, `retry:${assignmentId}:${tries}`, text, 'queue')
       void this.background(sent.finally(() => { if (waking) this.slots.free(ticketId); this.resuming.delete(assignmentId) })
-        .catch(failure => { this.failed(ticketId, String(failure)) }))
+        .catch(failure => { this.failed(ticketId, failure) }), ticketId)
     }
     this.after(TRANSIENT_BACKOFF_MS * 2 ** (tries - 1), go)
   }
@@ -609,7 +653,7 @@ export class DshExecutor implements Executor {
         if (!ended) return
         const note = `Your background job ${ended.name} ended: ${ended.status}.`
         await this.host.sessions.prompt(agent.id, `ended:${job.id}`, note, { inject: 'Background job ended' })
-      }))
+      }), ticketId)
     }
   }
   private async workerIdle(ticket: Ticket, idle: Assignment, agent: Agent): Promise<void> {
@@ -661,9 +705,9 @@ export class DshExecutor implements Executor {
       const sessionId = workerSessionId(ticket.id), minutes = BACKGROUND_LIMIT_MS / 60_000
       const jobs = runningJobs(this.host.context, sessionId, left).map(job => job.name)
       if (jobs.length) {
-        void this.background(killJobs(this.host.context, sessionId, 'The job ran past its limit', left))
+        void this.background(killJobs(this.host.context, sessionId, 'The job ran past its limit', left), ticket.id, 'cleanup')
         const note = `Your background jobs ran ${minutes} minutes after your turn ended and were killed: ${jobs.join(', ')}.`
-        void this.background(this.host.sessions.prompt(sessionId, `killed:${jobs.join(',')}`, note, { inject: 'Background jobs killed' }))
+        void this.background(this.host.sessions.prompt(sessionId, `killed:${jobs.join(',')}`, note, { inject: 'Background jobs killed' }), ticket.id)
       }
       stopped = jobs.length ? `Background jobs ran ${minutes} minutes after the worker's turn ended and were killed: ${jobs.join(', ')}.`
         : `Subagents still ran ${minutes} minutes after the worker's turn ended.`
