@@ -274,11 +274,19 @@ Check dsh-superagent: run `scripts/dsh-superagent --profile superagent status` i
 
 ### Windows-hosted WSL recovery
 
-An in-WSL schedule cannot recover a stopped WSL instance. Run the desktop launcher from Windows Task Scheduler under the user who owns the distribution, at sign-in and periodically. The local launcher's non-interactive `recover` mode checks the stop marker, calls `scripts/dsh-superagent recover --stop-timeout 90`, then rechecks the marker and probes the configured mobile gateway independently. It starts a missing gateway without opening the browser.
+An in-WSL schedule cannot recover a stopped WSL instance. To set up main-service recovery, create a Windows Task Scheduler task under the Windows user who owns the distribution. Choose **Run only when user is logged on**, add an **At log on** trigger and a time trigger repeated every five minutes, and select **Do not start a new instance** if the task is already running.
+
+Set the action to `wsl.exe`, with arguments like these. Replace the distribution, checkout and executable paths for your installation, and preserve any environment required by the existing service:
+
+```text
+-d Ubuntu --cd /home/example/dsh-superagent --exec /usr/bin/env PATH=/home/example/.local/bin:/usr/local/bin:/usr/bin:/bin ./scripts/dsh-superagent recover --profile superagent --stop-timeout 90
+```
+
+Run the task once while the service is healthy; confirm it leaves the PID unchanged and inspect the task's **Last Run Result**. Only the main-service recovery command is shipped in this repository.
 
 `recover` starts a missing main service, or gracefully restarts a single unchanged DSH process after two failed runtime checks. An unavailable management endpoint is not treated as a restart signal during the process's first `--timeout` seconds (60 by default) or if its age cannot be verified. Recovery leaves healthy, still-starting, setup-blocked and source-error processes alone, refuses duplicates, and never force-kills. An unresponsive mobile process is not killed automatically.
 
-The local `DSH Superagent Recovery` task runs at sign-in and every five minutes while that Windows user remains signed in. It does not store a password or wake the computer. Read the last result with `Get-ScheduledTaskInfo -TaskName 'DSH Superagent Recovery'`; disable the scheduled task to stop periodic checks, or use the normal launcher `stop` to keep the profile intentionally stopped until the next explicit start.
+If you already have a machine-specific launcher for EasyTier or the [mobile gateway](009-mobile.md), the scheduled action can call its own headless recovery entry instead. It should honor the main profile's manual-stop marker before and after main-service recovery, then probe and start a missing gateway without opening a browser. The launcher and Windows task are not installed by this repository. Disable your scheduled task to stop periodic checks, or use `scripts/dsh-superagent stop` to keep the profile intentionally stopped until the next explicit start.
 
 ## Settings
 
