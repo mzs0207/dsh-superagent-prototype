@@ -5,8 +5,9 @@ import { join, resolve } from 'node:path'
 import { z } from 'zod'
 import { normalizeName } from './inventory.ts'
 import {
-  EnvironmentWriteSchema, FingerprintSchema, HostWriteSchema, RemoteManagementError, RevisionSchema,
-  type EnvironmentWrite, type HostCredentials, type HostWrite, type ManagedHost, type ManagedView,
+  EnvironmentWriteSchema, FingerprintSchema, HostWriteSchema, PostgresResourceSchema, RemoteManagementError, ResourceWriteSchema,
+  RevisionSchema, WebsiteResourceSchema, type EnvironmentWrite, type HostCredentials, type HostWrite, type ManagedHost,
+  type ManagedResource, type ManagedView, type ResourceWrite,
 } from './managed-types.ts'
 
 const MAX_STATE_BYTES = 16 * 1024 * 1024
@@ -23,14 +24,23 @@ const SecretSchema = z.object({
 const StoredHostSchema = HostWriteSchema.omit({ revision: true, password: true }).extend({
   id: z.string().uuid(), auth: z.literal('password'), hostKeyFingerprint: FingerprintSchema.nullable(), secret: SecretSchema,
 }).strict()
+const resourceSecret = { id: z.uuid(), secret: SecretSchema }
+const StoredResourceSchema = z.union([
+  PostgresResourceSchema.extend(resourceSecret),
+  // Old vaults may still have these fields. Ignore them on read and omit them on the next save.
+  WebsiteResourceSchema.safeExtend({ ...resourceSecret, role: z.unknown().optional(), apiPaths: z.unknown().optional(),
+    webPaths: z.unknown().optional() }).transform(({ role: _, apiPaths: _api, webPaths: _web, ...resource }) => resource),
+])
 const StoredEnvironmentSchema = EnvironmentWriteSchema.omit({ revision: true }).extend({
   id: z.string().uuid(), hosts: z.array(StoredHostSchema).max(1000),
+  resources: z.array(StoredResourceSchema).max(1000).default([]),
 }).strict()
 const StateSchema = z.object({
-  version: z.literal(1), revision: RevisionSchema, environments: z.array(StoredEnvironmentSchema).max(1000),
+  version: z.union([z.literal(1), z.literal(2)]), revision: RevisionSchema, environments: z.array(StoredEnvironmentSchema).max(1000),
 }).strict()
 type State = z.infer<typeof StateSchema>
 type StoredHost = z.infer<typeof StoredHostSchema>
+type StoredResource = z.infer<typeof StoredResourceSchema>
 type Secret = z.infer<typeof SecretSchema>
 
 const unavailable = () => new RemoteManagementError(500, 'storage_unavailable',
@@ -57,7 +67,7 @@ function findHost(state: State, environmentId: string, hostId: string): StoredHo
 }
 function assertCollections(state: State): void {
   const environmentNames = new Set<string>()
-  const hostIds = new Set<string>()
+  const resourceIds = new Set<string>()
   for (const environment of state.environments) {
     // IDs share the selection namespace with names/aliases in the diagnostic inventory.
     for (const name of [environment.id, environment.name, ...environment.aliases]) {
@@ -66,10 +76,14 @@ function assertCollections(state: State): void {
         'Environment names and aliases must be unique.')
       environmentNames.add(normalized)
     }
+    for (const resource of environment.resources) {
+      if (resourceIds.has(resource.id)) throw invalid()
+      resourceIds.add(resource.id)
+    }
     for (const host of environment.hosts) {
       const hostId = normalizeName(host.id)
-      if (hostIds.has(hostId)) throw invalid()
-      hostIds.add(hostId)
+      if (resourceIds.has(hostId)) throw invalid()
+      resourceIds.add(hostId)
       const projects = new Set<string>()
       for (const project of host.projects) {
         const id = normalizeName(project.id)
@@ -80,13 +94,17 @@ function assertCollections(state: State): void {
   }
 }
 function hostView(host: StoredHost): ManagedHost {
-  return { id: host.id, name: host.name, host: host.host, port: host.port, username: host.username,
+  return { id: host.id, type: 'linux-host', notes: host.notes, name: host.name, host: host.host, port: host.port, username: host.username,
     auth: 'password', hasPassword: true, hostKeyFingerprint: host.hostKeyFingerprint, projects: structuredClone(host.projects) }
+}
+function resourceView({ secret: _, ...resource }: StoredResource): ManagedResource {
+  return { ...resource, hasPassword: true }
 }
 function viewOf(state: State): ManagedView {
   return { revision: state.revision, environments: state.environments.map(environment => ({
     id: environment.id, name: environment.name, aliases: [...environment.aliases], production: environment.production,
     hosts: environment.hosts.map(hostView),
+    ...(environment.resources.length ? { resources: environment.resources.map(resourceView) } : {}),
   })) }
 }
 function encrypt(key: Buffer, hostId: string, password: string): Secret {
@@ -100,7 +118,7 @@ function encrypt(key: Buffer, hostId: string, password: string): Secret {
     return { iv: iv.toString('base64'), tag: cipher.getAuthTag().toString('base64'), ciphertext: ciphertext.toString('base64') }
   } finally { plaintext.fill(0) }
 }
-function decrypt(key: Buffer, host: StoredHost): string {
+function decrypt(key: Buffer, host: { id: string; secret: Secret }): string {
   const decipher = createDecipheriv('aes-256-gcm', key, Buffer.from(host.secret.iv, 'base64'))
   decipher.setAAD(Buffer.from(host.id, 'utf8'))
   decipher.setAuthTag(Buffer.from(host.secret.tag, 'base64'))
@@ -131,7 +149,7 @@ export class ManagedStore {
       const parsed = parseInput(EnvironmentWriteSchema, input)
       assertRevision(state, parsed.revision)
       const { revision: _, ...fields } = parsed
-      state.environments.push({ ...fields, id: randomUUID(), hosts: [] })
+      state.environments.push({ ...fields, id: randomUUID(), hosts: [], resources: [] })
       return this.#commit(state)
     })
   }
@@ -193,6 +211,54 @@ export class ManagedStore {
     })
   }
 
+  saveResource(environmentId: string, id: string | undefined, input: ResourceWrite): Promise<ManagedView> {
+    return this.#execute(async (state, key) => {
+      const { revision, password, ...fields } = parseInput(ResourceWriteSchema, input)
+      assertRevision(state, revision)
+      const { resources } = findEnvironment(state, environmentId)
+      if (id === undefined) {
+        if (!password) throw new RemoteManagementError(400, 'password_required', 'A password is required for a new resource.')
+        const uid = randomUUID()
+        resources.push({ ...fields, id: uid, secret: encrypt(key, uid, password) })
+      } else {
+        const index = resources.findIndex(item => item.id === id), previous = resources[index]
+        if (!previous) throw new RemoteManagementError(404, 'resource_not_found', 'Environment resource was not found.')
+        if (previous.type !== fields.type) throw invalid()
+        const changedTarget = fields.username !== previous.username || (fields.type === 'postgresql' && previous.type === 'postgresql'
+          ? fields.host !== previous.host || fields.port !== previous.port || fields.database !== previous.database || fields.ca !== previous.ca
+          : fields.type === 'website-account' && previous.type === 'website-account'
+            && (fields.origin !== previous.origin || fields.system !== previous.system))
+        if (changedTarget && !password) throw new RemoteManagementError(400, 'password_required', 'Re-enter the password when changing a login target.')
+        resources[index] = { ...fields, id, secret: password ? encrypt(key, id, password) : previous.secret }
+      }
+      return this.#commit(state)
+    })
+  }
+
+  deleteResource(environmentId: string, id: string, revision: number): Promise<ManagedView> {
+    return this.#execute(async state => {
+      assertRevision(state, revision)
+      const { resources } = findEnvironment(state, environmentId)
+      const index = resources.findIndex(item => item.id === id)
+      if (index === -1) throw new RemoteManagementError(404, 'resource_not_found', 'Environment resource was not found.')
+      resources.splice(index, 1)
+      return this.#commit(state)
+    })
+  }
+
+  resourceCredentials(environmentId: string, id: string, expectedRevision: number, worker: boolean) {
+    return this.#execute(async (state, key) => {
+      assertRevision(state, expectedRevision)
+      const environment = findEnvironment(state, environmentId)
+      const resource = environment.resources.find(item => item.id === id)
+      if (!resource) throw new RemoteManagementError(404, 'resource_not_found', 'Environment resource was not found.')
+      if (environment.production || (worker && !resource.allowWorker)) {
+        throw new RemoteManagementError(400, 'resource_not_allowed', 'Credential use is not enabled for this environment and session.')
+      }
+      return { resource: resourceView(resource), password: decrypt(key, resource) }
+    })
+  }
+
   /** Internal-only: the manager must validate/consume its endpoint-bound challenge first. */
   trustHost(environmentId: string, hostId: string, revision: number, fingerprint: string): Promise<ManagedView> {
     return this.#execute(async state => {
@@ -235,6 +301,7 @@ export class ManagedStore {
   async #commit(state: State): Promise<ManagedView> {
     assertCollections(state)
     if (state.revision >= Number.MAX_SAFE_INTEGER) throw unavailable()
+    state.version = 2
     state.revision++
     const parsed = StateSchema.parse(state)
     const encoded = Buffer.from(JSON.stringify(parsed), 'utf8')
@@ -256,7 +323,7 @@ export class ManagedStore {
       if ((key === undefined) !== (json === null)) throw unavailable()
       if (key === undefined) {
         key = randomBytes(32)
-        const state: State = { version: 1, revision: 0, environments: [] }
+        const state: State = { version: 2, revision: 0, environments: [] }
         await this.#atomicWrite('master.key', key, true)
         await this.#atomicWrite('state.json', Buffer.from(JSON.stringify(state)), true)
         return { state, key }
@@ -266,7 +333,10 @@ export class ManagedStore {
       try {
         assertCollections(state)
         // Authenticate all stored secrets before exposing any supposedly healthy snapshot.
-        for (const environment of state.environments) for (const host of environment.hosts) decrypt(key, host)
+        for (const environment of state.environments) {
+          for (const host of environment.hosts) decrypt(key, host)
+          for (const resource of environment.resources) decrypt(key, resource)
+        }
       } catch { throw unavailable() }
       return { state, key }
     } catch (error) {

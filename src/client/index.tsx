@@ -1,4 +1,4 @@
-/** Browser plugin entry point registering the sidebar icon, main management panel, and Plugin Manager config view. */
+/** Browser entry for the Superagent panel, native environment settings and Plugin Manager config view. */
 import { useCallback, useEffect, useRef } from 'react'
 import type { Context } from '@deepseek-ai/cordis'
 import type { MainPanelId } from '@deepseek-ai/dsh-client-ui-layout/client'
@@ -11,8 +11,10 @@ import type { PluginConfigViewProps } from '@deepseek-ai/dsh-client-ui-plugin-ma
 import type { ISessions } from '@deepseek-ai/dsh-api-session-controller/client'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import { openKnownSession, SessionNavigationError } from '../navigation.ts'
+import { RemotePage } from '../remote-ops/page.tsx'
 import { App } from './app.tsx'
 import { PluginConfig, usePageForm } from './deployment.tsx'
+import STYLES from './client.css?raw'
 import { en, zh } from './locales.ts'
 import type { T } from './text.ts'
 
@@ -46,13 +48,16 @@ function Mounted({ ctx, t }: { ctx: ClientContext; t: T }) {
 }
 
 export const inject = ['slots', 'locale', 'sessions', 'uiWorkspace']
-/** Registers the panel, sidebar icon, and Plugin Manager config view; `configForms` is optional (without it, machine settings are read-only). */
+/** Registers browser surfaces; `configForms` is optional (without it, machine settings are read-only). */
 export function apply(ctx: ClientContext): void {
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'dsh-superagent: dictionaries')
   const t = ctx.locale.bind(NS)
   ctx.slots.inject('main', () => ctx.slots.register({ name: 'main', key: PANEL_ID, locale: NS, inject: () => ({}) },
     (props: { t: T }) => <Mounted ctx={ctx} t={props.t} />))
   ctx.slots.inject('sidebar.panellist', () => ctx.slots.register({ name: 'sidebar.panellist', id: PANEL_ID, order: 10, label: () => t('panel'), locale: NS }, HammerIcon))
+  ctx.slots.inject('settings.section', () => ctx.slots.register({
+    name: 'settings.section', id: 'environment-resources', order: 16, label: () => t('tab.remote'), locale: NS, inject: () => ({}),
+  }, (props: { t: T }) => <div className="dt-embedded"><style>{STYLES}</style><RemotePage t={props.t} /></div>))
   ctx.slots.inject('plugins.row.config', () => ctx.slots.register({ name: 'plugins.row.config', key: `${ENTRY}#${ENTRY}`, locale: NS },
     (props: PluginConfigViewProps & { t: T }) => <PluginConfig t={props.t} view={props.view} form={props.form} />))
 }

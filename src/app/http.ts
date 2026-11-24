@@ -1,7 +1,7 @@
 /** Loopback-only management HTTP routes with same-origin enforcement for the web panel. */
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-host-webserver'
-import type { IncomingMessage, ServerResponse } from 'node:http'
+import { json, match, readBody, RouteError, sameOrigin } from '../infra/management-http.ts'
 import { z } from 'zod'
 import { THREAD_FILTERS, TICKET_FILTERS, type Api, type ApiResponse, type RouteParams } from './api.ts'
 import { sourceSkills } from './context.ts'
@@ -29,12 +29,9 @@ import { decisionList, search, threadDetail, threadList } from './views/threads.
 import { executorLoad, ticketDetail, ticketList } from './views/tickets.ts'
 import { Conversations } from './conversations.ts'
 import type { OptimizationLedger } from './optimization.ts'
-import type { ManagedRemoteOps } from '../remote-ops/managed.ts'
-import { DeleteSchema, EnvironmentWriteSchema, HostWriteSchema, RemoteManagementError } from '../remote-ops/managed-types.ts'
 
 export interface HttpHost {
   readonly store: Store
-  readonly remote: ManagedRemoteOps
   readonly optimization: Pick<OptimizationLedger, 'records' | 'summary' | 'lessons' | 'saveLesson'>
   /** Feishu message links resolved since startup, used by search to match AppLink URLs. */
   readonly sourceLinks: Pick<TextCache, 'entries'>
@@ -60,37 +57,12 @@ export interface HttpHost {
   requestPass(): void
   models(): Promise<ModelCatalog>
 }
-/**
- * Represents a client-facing 400 or 404 error raised during management route parsing or lookup.
- * Route handlers throw it when request bodies are malformed or target records are missing, and registerHttp serializes its status and message in the HTTP response.
- */
-class RouteError extends Error { constructor(readonly status: 400 | 404, message: string) { super(message) } }
-async function readBody(req: IncomingMessage, maxBytes = 128 * 1024): Promise<unknown> {
-  let size = 0; const chunks: Buffer[] = []
-  for await (const chunk of req) {
-    const bytes = Buffer.from(chunk); size += bytes.length
-    if (size > maxBytes) throw new RouteError(400, `Request exceeds ${maxBytes} bytes`)
-    chunks.push(bytes)
-  }
-  try { return JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown }
-  catch { throw new RouteError(400, 'The request body is not JSON') }
-}
-function json(res: ServerResponse, status: number, value: unknown): void {
-  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' }); res.end(JSON.stringify(value))
-}
-export function sameOrigin(req: Pick<IncomingMessage, 'headers'>, port: number | undefined): boolean {
-  if (port === undefined) return false
-  const host = req.headers.host
-  if (host !== `127.0.0.1:${port}` && host !== `localhost:${port}`) return false
-  return req.headers['x-orchestrator-request'] === '1' && (req.headers.origin === undefined || req.headers.origin === `http://${host}`)
-}
 /** Maps errors to HTTP status codes and structured payloads that the panel localizes in the interface language. */
 function failure(error: unknown): [number, Record<string, unknown>] {
   if (error instanceof z.ZodError) {
     const issues = error.issues.map(issue => ({ path: issue.path.join('.'), message: issue.message }))
     return [400, { error: `Invalid settings: ${issues.map(issue => issue.path).join(', ')}`, issues }]
   }
-  if (error instanceof RemoteManagementError) return [error.status, { error: error.message, code: error.code }]
   if (error instanceof SetupError) return [400, { error: error.message, setup: error.problem }]
   if (error instanceof RouteError) return [error.status, { error: error.message }]
   if (error instanceof UserError) return [error.missing ? 404 : 400, { error: error.message, code: error.code, values: error.values }]
@@ -168,16 +140,6 @@ function routes(runtime: HttpHost, conversations: Conversations): Routes {
   const ticket = (id: string) => { if (!store.tickets.get(id)) throw new RouteError(404, 'Ticket not found'); return id }
   const promptBody = (input: { body: (maxBytes?: number) => Promise<unknown> }) => input.body(4 * runtime.machine.promptMaxChars.get() + 4096)
   return {
-    'GET remote': () => runtime.remote.store.view(),
-    'POST remote/environments': async ({ body }) => runtime.remote.store.createEnvironment(EnvironmentWriteSchema.parse(await body())),
-    'PUT remote/environments/:environment': async ({ params, body }) => runtime.remote.store.updateEnvironment(params.environment, EnvironmentWriteSchema.parse(await body())),
-    'DELETE remote/environments/:environment': async ({ params, body }) => runtime.remote.store.deleteEnvironment(params.environment, DeleteSchema.parse(await body()).revision),
-    'POST remote/environments/:environment/hosts': async ({ params, body }) => runtime.remote.store.createHost(params.environment, HostWriteSchema.parse(await body())),
-    'PUT remote/environments/:environment/hosts/:host': async ({ params, body }) => runtime.remote.store.updateHost(params.environment, params.host, HostWriteSchema.parse(await body())),
-    'DELETE remote/environments/:environment/hosts/:host': async ({ params, body }) => runtime.remote.store.deleteHost(params.environment, params.host, DeleteSchema.parse(await body()).revision),
-    'POST remote/environments/:environment/hosts/:host/probe': async ({ params, body, signal }) => runtime.remote.probe(params.environment, params.host, await body(), signal),
-    'POST remote/environments/:environment/hosts/:host/trust': async ({ params, body }) => runtime.remote.trust(params.environment, params.host, await body()),
-    'POST remote/environments/:environment/hosts/:host/test': async ({ params, body, signal }) => runtime.remote.test(params.environment, params.host, await body(), signal),
     'GET optimization': ({ query }) => runtime.optimization.summary(query),
     'GET optimization/records': ({ query }) => runtime.optimization.records(query),
     'GET optimization/lessons': ({ query }) => runtime.optimization.lessons(query),
@@ -245,21 +207,6 @@ function routes(runtime: HttpHost, conversations: Conversations): Routes {
     },
     'POST prompts/preview': async input => runtime.prompts.preview(await promptBody(input)),
   }
-}
-function decoded(segment: string): string {
-  try { return decodeURIComponent(segment) } catch { throw new RouteError(400, 'A path segment has a malformed escape') }
-}
-function match(table: Routes, method: string, segments: string[]) {
-  for (const [route, run] of Object.entries(table)) {
-    const [verb, path] = route.split(' ') as [string, string]
-    const pattern = path.split('/')
-    const fits = pattern.length === segments.length && pattern.every((part, index) => part.startsWith(':') || part === segments[index])
-    if (verb !== method || !fits) continue
-    const params: Record<string, string> = {}
-    pattern.forEach((part, index) => { if (part.startsWith(':')) params[part.slice(1)] = decoded(segments[index]!) })
-    return { run: run as (input: Input<keyof Api>) => unknown, params }
-  }
-  return undefined
 }
 export function registerHttp(ctx: Context, runtime: HttpHost): () => void {
   if (ctx.webServer.host !== '127.0.0.1') throw new Error('Orchestrator management requires a loopback Web server')

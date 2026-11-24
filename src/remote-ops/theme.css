@@ -1,0 +1,28 @@
+:root {
+  color-scheme: light dark;
+  font-family: system-ui, sans-serif;
+  --dsw-alias-label-primary: CanvasText;
+  --dsw-alias-label-secondary: color-mix(in srgb, CanvasText 82%, Canvas);
+  --dsw-alias-label-tertiary: color-mix(in srgb, CanvasText 70%, Canvas);
+  --dsw-alias-label-caption: var(--dsw-alias-label-tertiary);
+  --dsw-alias-label-dimmed: GrayText;
+  --dsw-alias-label-primary-foreground: HighlightText;
+  --dsw-alias-bg-base: Canvas;
+  --dsw-alias-bg-layer-1: Canvas;
+  --dsw-alias-bg-layer-2: color-mix(in srgb, CanvasText 4%, Canvas);
+  --dsw-alias-border-l2: color-mix(in srgb, CanvasText 24%, Canvas);
+  --dsw-alias-border-l3: color-mix(in srgb, CanvasText 17%, Canvas);
+  --dsw-alias-border-l4: var(--dsw-alias-border-l3);
+  --dsw-alias-button-primary-fill: Highlight;
+  --dsw-alias-button-primary-hover: Highlight;
+  --dsw-alias-brand-primary: LinkText;
+  --dsw-alias-link: LinkText;
+  --dsw-alias-interactive-bg-hover: color-mix(in srgb, Highlight 8%, Canvas);
+  --dsw-alias-interactive-bg-active: color-mix(in srgb, Highlight 15%, Canvas);
+  --dsw-alias-state-error-primary: light-dark(#a52020, #ff9a9a);
+  --dsw-alias-state-success-primary: light-dark(#21693f, #78d8a0);
+  --dsw-alias-state-warn-primary: light-dark(#805014, #ffc480);
+}
+body { margin: 0; background: Canvas; }
+button, input, textarea { font-family: inherit; }
+#environment-resources { height: 100dvh; }

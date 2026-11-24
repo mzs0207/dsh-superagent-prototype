@@ -388,6 +388,7 @@ The independent remote-ops tool plugin preserves legacy inventoryFile/OpenSSH mo
 | `src/executor/background.ts` | A worker's background work in DeepSeek Harness, the shell jobs its Session owns (`ctx.jobs`) and its subagents (`ctx.subagents`): `runningJobs`, `untilQuiet`, `killJobs`, `collectJobs`, `stopSubagents`, `stopBackground`, `until`, and `cancelled`, the workers whose turn a stop of their subagents cancelled |
 | `src/infra/commands.ts` | `Commands`, the CLI transport: `run`; `api` and `pages`, limited to the configured repository and validated; `lark` as the bot; `git`. `CliError` carries the code a command's output reports, such as a GitHub HTTP status, and a command that prints nothing fails with how it ended, never with its arguments; `validItems` skips and counts the malformed items of a list |
 | `src/infra/environment.ts` | The agent's process environment: command shims, the git configuration and credential helper, `runAsWorker`, and the checks of the environment and of a Ticket's directory |
+| `src/infra/management-http.ts` | Shared management HTTP primitives: loopback authority and Origin guard, bounded JSON, no-store responses and parameter matching |
 | `src/infra/paths.ts` | The package's root, where packaged files are |
 | `src/infra/text.ts` | Word counts and the chat message limit, `fill` and `sameName` |
 | `src/infra/health.ts` | The `HealthBoard`, every part's health entry, each claimed by its one writer |
@@ -410,7 +411,7 @@ The independent remote-ops tool plugin preserves legacy inventoryFile/OpenSSH mo
 | `src/sources/feishu-read.ts` | The `feishu/` reads of a Trigger's message, its root, parent and topic, and `feishuThreadContext`, which gives them to assessments with their images |
 | `src/sources/admission-context.ts` | The bounded window an assessment starts from: the first pages of a Trigger's Thread, read through its kind, and the messages around the Trigger |
 | `src/sources/feishu-image.ts` | Reads a Feishu message's image as an attachment for the assessing Session |
-| `src/client/index.tsx` | The client plugin entry: the sidebar entry, the main panel and the page in DeepSeek Harness's Plugin Manager |
+| `src/client/index.tsx` | Browser entry for the Superagent sidebar and panel, the native Environments & hosts settings section, and the Plugin Manager config view |
 | `src/client/app.tsx` | The panel: header, search, glossary, tabs and the page of the current route |
 | `src/client/provider.tsx` | What every page reads from its host: copy, calls, navigation, notices, the state poll, and `restart`, which reads the state quickly while dsh-superagent restarts |
 | `src/client/api.ts` | Calls and polls of the management API, typed by `src/app/api.ts`, and the Decision filters of the Eval status |
@@ -432,15 +433,17 @@ The independent remote-ops tool plugin preserves legacy inventoryFile/OpenSSH mo
 | `src/client/marks.ts` | The marks of the states the views classify: a Ticket's or a Thread's stage, a Source's state and a Decision's outcome, each as a dot, an icon, a tone and a label |
 | `src/client/locales.ts` | All copy in both languages, and the glossary of [001 Domain model](001-domain.md) |
 | `src/client/client.css`, `css.d.ts` | The panel's stylesheet, loaded as text |
-| `src/remote-ops/index.ts` | Native read-only tools: prefer explicitly configured legacy file, otherwise delegate to the Runtime-managed password service; cancellation/disposal waits for delegated work |
+| `src/remote-ops/index.ts` | Independent DSH plugin: locks the managed vault, registers its management page and read-only tools, drains work before releasing the lock |
 | `src/remote-ops/inventory.ts` | Bounded, dynamically read JSON environment/server/Compose inventory; strict schemas, normalized exact selectors and credential-free discovery |
 | `src/remote-ops/commands.ts` | All-target preflight, fixed read-only Docker/Linux commands, shell-data quoting and hardened noninteractive OpenSSH argv |
 | `src/remote-ops/runner.ts` | Bounded stdout/stderr, timeout/cancellation/process-group cleanup, shared connection slots for tests/probes/diagnostics, managed transport adapter and per-server evidence without workspace switching |
 | `src/remote-ops/managed-types.ts` | Strict public UI write schemas, password-free environment/host DTOs and non-sensitive errors; browser consumers import types only |
 | `src/remote-ops/managed-store.ts` | Private lazy AES-256-GCM vault: UUID AAD, owner/permission/file-type checks, atomic snapshots, serialized revision CAS, credential-free views and drain-on-close |
 | `src/remote-ops/password-ssh.ts` | ssh2 password authentication, unauthenticated fingerprint probe, strict fingerprint pins, bounded command output and cancellable connection-only tests |
-| `src/remote-ops/managed.ts` | Runtime remoteOps service: encrypted store, endpoint/revision-bound single-use trust challenges, password-free tool discovery and fixed read-only command execution |
-| `src/client/remote.tsx` | Environment/host/Compose management tab, inline CRUD/CAS/delete confirmation, ephemeral password inputs, fingerprint review and connection tests with stale-response isolation |
+| `src/remote-ops/managed.ts` | Owns the encrypted store, endpoint/revision-bound SSH trust, and short-lived website logins scoped to an agent, resource, mode and vault revision |
+| `src/remote-ops/resource-checks.ts` | TLS PostgreSQL checks and OMS, WorksBase Community and ZenTao Web/API authentication, read-only access and response redaction |
+| `src/remote-ops/api.ts`, `http.ts` | Independent `/environment-resources` page and credential-safe management API on the local DSH web server |
+| `src/remote-ops/client.tsx`, `page.tsx`, `theme.css` | Standalone bilingual environment/host/Compose manager, inline CRUD, revision checks, ephemeral password inputs and SSH trust |
 | `src/mobile/gateway.ts` | Private HTTP listener: password login, bounded authentication, fixed loopback task projections, allowlisted JSON conversation writes and cancellable SSE forwarding |
 | `src/mobile/cli.ts` | Private password-hash setup, password changes and foreground viewer lifecycle; leaves the DSH profile unchanged |
 | `src/mobile/view.html`, `view.js`, `view.css` | Touch task/conversation tabs, safe text rendering, pagination/history, in-page drafts, stable submission IDs and visibility-aware polling/streaming |

@@ -1,8 +1,14 @@
-# 环境与主机管理 / Linux Docker Compose 排障
+# 环境资源：主机、数据库与测试账号
+
+## 拆分升级：保留已有环境与主机
+
+在加载新构建**之前**，备份原 `<Superagent stateDir>/remote-ops/`（包括 `state.json` 和 `master.key`），然后在本地 profile 的 `cordis.patch.yml` 给 `dsh-superagent-remote-ops` 设置 `config.stateDir`，值为**原目录的绝对路径**，而不是 Superagent 的上一级目录。见 [profile 示例](../examples/profile.cordis.patch.yml)。若已有对应配置块，在同一块内加入 `stateDir`，保留 `inventoryFile` 等原选项。
+
+重启同一 DSH profile 后，独立插件原地接管台账，不移动或重写旧文件，不需要重新录入密码或信任指纹。不要让多个 profile 共用同一台账。旧台账（v1）可读，既有主机自动显示为 Linux 主机；首次保存写 v2，保留原 ID、指纹和密码密文。需要退回仅支持 v1 的版本时，先停止新版，再成对恢复升级前备份的 `state.json` 和 `master.key`；新版写入不会出现在旧备份中。
 
 ## 先用 UI：创建环境和密码主机
 
-构建并重新加载本项目后，在 **Superagent → 环境与主机** 页签操作，不需要先编辑台账文件：
+在 DSH 左下角打开 **设置 → 环境资源**，不打开新标签页。仅加载 `dsh-superagent/remote-ops` 的 profile 可用同源直达页 `/environment-resources`；管理 API 和工具不依赖 Superagent 启动。
 
 1. 点击 **新增环境**，填写开发/测试/生产/开发V2等名称，可加中文别名和生产标记。允许先创建空环境。
 2. 选中环境，点击 **添加主机**，填写显示名称、IP或域名、SSH端口（默认22）、用户名和密码。当前 UI **只支持直接密码认证**；不读 SSH config，不支持跳板机、密钥、OTP或 keyboard-interactive。
@@ -11,11 +17,24 @@
 5. 点击 **获取指纹**：只进行 SSH key exchange，不发送密码。通过服务器控制台等独立可信渠道核对 SHA256 指纹后，勾选核对声明并点击 **信任该指纹**。确认 token 与目标、配置版本绑定，5分钟有效、只能使用一次；不能自动接受未知密钥。
 6. 点击 **测试连接**，仅尝试密码认证，不执行远程命令。成功只代表 SSH 认证成功，不代表 Docker 权限或业务健康。随后可在对话中要求只读排查。
 
-修改主机地址或端口会清除指纹信任；需重新核对才能发送密码。更改密码、项目、用户名后，已有指纹仍对应同一服务器。配置有 revision 并发保护，遇到409请刷新并比较，不会静默覆盖其他人的修改。环境删除会一并移除其主机和密码密文，需要页面内二次确认。
+修改主机地址或端口会清除指纹信任；需重新核对才能发送密码。更改密码、项目、用户名后，已有指纹仍对应同一服务器。配置有 revision 并发保护，遇到409请刷新并比较。环境删除连同所有资源和密文删除，需要页面内二次确认。
+
+### 数据库、网站账号和备注
+
+- **新增数据库**：填写 PostgreSQL 地址、端口、库名和专用只读账号。有私有证书链时提供可信 CA PEM。检查强制校验 TLS，以只读会话执行固定 `SELECT 1`；不会运行用户提供的 SQL，不自动建立 SSH 隧道。
+- **新增网站账号**：显式选择 **OMS、WorksBase 社区、禅道**，再填站点地址、账号和密码。OMS 和社区用邮箱；禅道用用户名，支持 `/zentao` 等安装子路径。其余站点填根地址，不带登录路径、查询参数或账号。旧账号默认 OMS，原 ID 和凭据不变。更改登录系统或站点须重新输入密码，避免把旧凭据发给不同系统。
+  HTTPS 保持支持；HTTP 仅接受 RFC 1918 私网 IPv4（`10.0.0.0/8`、`172.16.0.0/12`、`192.168.0.0/16`，可带端口）。HTTP 会明文传输密码和登录令牌，仅用于可信内网。
+- Web 检查依赖 Chromium。可在本项目安装匹配的 `pnpm exec playwright-core install chromium`，或在插件配置中指定可信 Chromium 的绝对路径 `browserExecutable`。API 和 PostgreSQL 检查不需要启动浏览器。
+  社区 Web 登录需要账号持有人先阅读该站条款和隐私政策，并在资源表单确认；API 登录无需此选项。社区清理只丢弃本地登录态，不调用会注销所有设备的接口。
+- 每条资源可填最多 2000 字符的**备注**，只写用途、角色或访问前提，不写密码、令牌、连接串中的秘密或执行指令。备注会用于会话检索，不进入 Hindsight。更改数据库或网站登录目标时必须重新确认密码。生产环境禁用新增类型的凭据检查；Worker 需单条资源显式启用，子代理不能代用凭据。
+
+普通会话和获授权 Worker 使用 `remote_ops_resources` 按环境、类型、资源 ID 或名称/备注关键词定位资源。`remote_ops_resource_check` 对明确的资源做一次性检查，`action` 为 `database`、`web` 或 `api`。`inventoryFile` 仍只覆盖 SSH 旧工具，不覆盖托管资源。
+
+登录后，使用 `remote_ops_resource_read` 在**同一会话**读取该系统支持的只读路径；禅道路径相对安装目录，例如 `/api.php/v1/products`，不用再写 `/zentao`。OMS API 支持 `/api/oms/` 下的 GET（排除认证路由）；社区支持 `/api/users/user-profiles` 与 `/api/resources/work/list`；禅道 API 支持产品和缺陷查询，Web 仅支持已确认的查看页面，因为部分禅道操作也使用 GET。不恢复逐账号路径白名单，不跟随重定向，不允许跨站或业务写入。输出只包含有界的页面文本或脱敏 JSON，不返回密码、Cookie 或 Token。登录态最多 5 分钟，过期、会话销毁或插件停止时清理；台账变更后重新登录。
 
 ### 密码如何保存
 
-管理服务在现有主插件 `<stateDir>/remote-ops` 下保存 `state.json`（元数据和 AES-256-GCM 密文）与 `master.key`（独立随机密钥）。目录0700、文件0600；密文绑定主机UUID，原子写入，缺失/损坏密钥或不安全文件会拒绝读取，**不会重新生成密钥覆盖旧密码**。备份和恢复必须同时保留两者及权限；不要提交到Git或粘贴到聊天。
+插件在其 `stateDir` 保存 `state.json`（元数据和 AES-256-GCM 密文）与 `master.key`（独立随机密钥），持有目录锁直至写入结束。目录0700、文件0600；密文按资源 UUID 绑定，原子写入，缺失/损坏密钥或不安全文件会拒绝读取，**不会重新生成密钥覆盖旧密码**。备份和恢复必须同时保留两者及权限。
 
 加密用于降低静态文件误泄露风险，**不防同账号/root或已控制 DSH Host 的进程读取密钥**。管理API沿用当前可信本机的loopback/Origin/自定义请求头限制，无额外用户登录或RBAC；有本机命令权限的agent/进程并不是此HTTP接口的隔离对象。生产环境还应使用受限账号、限制本机/会话访问，并避免直接将此HTTP服务开放到公网。
 
@@ -27,7 +46,7 @@
 
 ## 选择与边界
 
-新增独立 DSH 原生插件 `dsh-superagent/remote-ops`，随本项目 bundle 注册。无需修改 DSH 核心；密码模式使用项目依赖 ssh2，旧台账模式才需要本机 OpenSSH `ssh`。远端需要 Linux、Docker 和 Compose v2。
+独立 DSH 原生插件 `dsh-superagent/remote-ops` 随本项目 bundle 注册，也可单独挂载，不需要单独进程。管理页面使用同一个仅监听 `127.0.0.1` 的 DSH Web 服务，不经手机网关。密码模式使用项目依赖 ssh2，旧台账模式才需要本机 OpenSSH `ssh`。远端需要 Linux、Docker 和 Compose v2。
 
 - **环境 → 多台服务器 → 每机多个 Compose 项目**，支持开发、测试、生产、开发环境V2，以及任意新增名称和中文别名。
 - 同一对话按环境逐台采集，返回每台服务器的目标、退出码、输出、耗时、超时和截断状态，不修改当前工作目录/远程工作区。
@@ -111,7 +130,7 @@ Host bastion
 
 ## 3. 启用插件
 
-本项目构建后包含插件入口。升级 bundle 时先执行 `pnpm check`，按现有项目部署方式加载新构建并**重启当前 DSH 实例**。仅修改源码或构建不会让正在运行的旧Host插件自动生效；现有客户端插件也已包含新管理页，需要重载后刷新原地址。没有另起 Web 服务。
+本项目构建后包含插件入口及独立页面。升级 bundle 时先验证新构建，按开头说明设置 `stateDir`，并**重启当前 DSH 实例**。仅修改源码或构建不会让正在运行的旧 Host 插件自动生效。
 
 在 DSH 插件管理中配置 `dsh-superagent-remote-ops` 的 `inventoryFile`，或在该 profile 配置中加入（示例数据）：
 
@@ -124,9 +143,9 @@ Host bastion
     maxConcurrent: 2
 ```
 
-配置文件示例也见 [profile patch](../examples/profile.cordis.patch.yml)。默认 inventoryFile 为空时，有主插件管理服务就使用UI台账；独立安装且无管理服务时显示待配置。保存配置本身不连接服务器。这些配置项用于旧文件/OpenSSH模式：`timeoutSeconds` 范围1..120，输出上限1KiB..1MiB（stdout+stderr合计），并发上限1..8。UI管理的密码模式当前固定每连接30秒、每机64KiB输出上限，指纹获取/测试/诊断共用2个并发连接槽。
+默认 `inventoryFile` 为空时，工具使用 `stateDir` 指定的台账；两者都为空时工具提示待配置，管理页面不挂载。保存配置本身不连接服务器。上述超时、输出、并发选项仅适用于旧文件/OpenSSH 模式：`timeoutSeconds` 1..120，`maxOutputBytes` 1KiB..1MiB（stdout+stderr 合计），`maxConcurrent` 1..8。UI 管理的密码模式固定每连接30秒、每机64KiB输出，指纹获取/测试/诊断共用2个并发连接槽。
 
-独立使用此插件也可以在另一个 DSH bundle/profile 中插入 `name: dsh-superagent/remote-ops`，不依赖 Superagent 的仓库/飞书配置。普通 DSH 会话获得两个工具。Superagent worker 白名单也已加入这两个工具，仍受工单授权和存活 guard 约束；路由主 Session 不承担远程排障。
+独立使用时，在安装了同一包的 DSH profile 中仅插入 `name: dsh-superagent/remote-ops`，配置插件的 `stateDir`；无需安装工单主插件或配置仓库、飞书。普通 DSH 会话可调用工具；Superagent Worker 仍受白名单和工单存活 guard 约束。路由主 Session 不承担远程排障。
 
 ## 4. 对话用法
 

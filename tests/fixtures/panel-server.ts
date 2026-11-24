@@ -5,7 +5,8 @@
 import { afterEach, beforeEach, expect, vi } from 'vitest'
 import { z } from 'zod'
 import type { ConfigForm, ConfigFormSnapshot } from '@deepseek-ai/dsh-client-ui-settings/client'
-import type { Api, ApiResponse, RouteParams } from '../../src/app/api.ts'
+import type { Api as SuperagentApi, RouteParams as SuperagentParams } from '../../src/app/api.ts'
+import { REMOTE_API, type RemoteApi, type RemoteParams } from '../../src/remote-ops/api.ts'
 import { SKILL_NAME, SKILL_PREFIX, TEAM_SECTIONS, builtInBase, builtInPart, builtInParts, composePrompt, composeSkill, defaultPrompts,
   environmentSection, policySection, promptParts } from '../../src/app/prompts.ts'
 import type { DroppedReply, HistoryView, Problem, PromptsView, SetupView, SourceStatusRow, SourceView, StateView, ThreadPageView,
@@ -22,7 +23,7 @@ import { githubKind } from '../../src/sources/github.ts'
 import type { Health } from '../../src/sources/host.ts'
 import type { SourceKind } from '../../src/sources/kind.ts'
 import { testDeployment } from './deployment.ts'
-import { DeleteSchema, EnvironmentWriteSchema, HostWriteSchema, ProbeSchema, TrustSchema } from '../../src/remote-ops/managed-types.ts'
+import { DeleteSchema, EnvironmentWriteSchema, HostWriteSchema, ProbeSchema, ResourceWriteSchema, TrustSchema } from '../../src/remote-ops/managed-types.ts'
 import type { ConnectionTest, HostKeyProbe, ManagedView } from '../../src/remote-ops/managed-types.ts'
 
 export const MEMBER = 'ou_alice'
@@ -288,6 +289,9 @@ function initial(): PanelServer {
 /** A refusal response carrying the host's HTTP status code and JSON error body. Returned by route handlers when a request is rejected. */
 class Refusal { constructor(readonly status: 400 | 404 | 409 | 500, readonly body: Record<string, unknown>) {} }
 const refuse = (status: Refusal['status'], error: string, more: Record<string, unknown> = {}) => new Refusal(status, { error, ...more })
+type Api = SuperagentApi & RemoteApi
+type ApiResponse<K extends keyof Api> = Api[K]['response']
+type RouteParams<K extends keyof Api> = K extends keyof RemoteApi ? RemoteParams<K> : K extends keyof SuperagentApi ? SuperagentParams<K> : never
 type Query<K extends keyof Api> = Api[K] extends { query?: infer Q } ? keyof NonNullable<Q> & string : never
 type Body<K extends keyof Api> = Api[K] extends { body: infer B } ? B : undefined
 interface Request<K extends keyof Api> { params: RouteParams<K>; query: Partial<Record<Query<K>, string>>; body: Body<K> }
@@ -308,6 +312,27 @@ function remoteWrite(revision: number, write: () => void | Refusal): ManagedView
   if (failure) return failure
   server.remote.revision++
   return remoteView()
+}
+function saveRemoteResource(environmentId: string, input: unknown, id?: string) {
+  const parsed = ResourceWriteSchema.safeParse(input)
+  if (!parsed.success) return refuse(400, 'Invalid resource')
+  const { revision, password, ...fields } = parsed.data
+  return remoteWrite(revision, () => {
+    const environment = remoteEnvironment(environmentId)
+    if (!environment) return refuse(404, 'Environment not found')
+    const resources = environment.resources ??= []
+    if (id === undefined) {
+      if (!password) return refuse(400, 'Password required')
+      const created = crypto.randomUUID()
+      resources.push({ ...fields, id: created, hasPassword: true })
+      server.remotePasswords[created] = password
+    } else {
+      const index = resources.findIndex(resource => resource.id === id)
+      if (index < 0) return refuse(404, 'Resource not found')
+      resources[index] = { ...fields, id, hasPassword: true }
+      if (password) server.remotePasswords[id] = password
+    }
+  })
 }
 const REMOTE_FINGERPRINT = `SHA256:${'a'.repeat(43)}`
 
@@ -405,6 +430,22 @@ const ROUTES: { [K in keyof Api]: Route<K> } = {
     const result = structuredClone(server.remoteTest)
     await server.remoteWaiting?.('test', params.host)
     return result
+  } },
+  'POST remote/environments/:environment/resources': { body: true, answer: ({ params, body }) => saveRemoteResource(params.environment, body) },
+  'PUT remote/environments/:environment/resources/:resource': { body: true, answer: ({ params, body }) =>
+    saveRemoteResource(params.environment, body, params.resource) },
+  'DELETE remote/environments/:environment/resources/:resource': { body: true, answer: ({ params, body }) =>
+    remoteWrite(body.revision, () => {
+      const resources = remoteEnvironment(params.environment)?.resources
+      const index = resources?.findIndex(resource => resource.id === params.resource) ?? -1
+      if (!resources || index < 0) return refuse(404, 'Resource not found')
+      resources.splice(index, 1)
+      delete server.remotePasswords[params.resource]
+    }) },
+  'POST remote/environments/:environment/resources/:resource/check': { body: true, answer: ({ params, body }) => {
+    if (body.revision !== server.remote.revision) return refuse(409, 'Inventory changed')
+    const target = remoteEnvironment(params.environment)?.resources?.find(resource => resource.id === params.resource)
+    return target ? structuredClone(server.remoteTest) : refuse(404, 'Resource not found')
   } },
 
   // Optimization behavior uses the real SQLite/runtime fixture, not this UI-only server.
@@ -547,13 +588,16 @@ async function run<K extends keyof Api>(key: K, params: Record<string, string>, 
   return route.answer({ params: params as RouteParams<K>, query: values, body: body as Body<K> })
 }
 /**
- * Response wrapper that increments `server.pending` when constructed and decrements it when `.text()` is consumed.
+ * Tracks successful responses and Superagent errors until the client consumes their bodies.
  * Requests held back by `server.searching` are not constructed until `searching` resolves, so they do not count as pending early.
  */
 class Reply extends Response {
-  constructor(value: unknown, status: number) { super(JSON.stringify(value), { status,
-    headers: { 'content-type': 'application/json' } }); server.pending++ }
-  override async text() { server.pending--; return super.text() }
+  constructor(value: unknown, status: number, private readonly tracked: boolean) {
+    super(JSON.stringify(value), { status, headers: { 'content-type': 'application/json' } })
+    if (tracked) server.pending++
+  }
+  override async text() { if (this.tracked) server.pending--; return super.text() }
+  override async json() { if (this.tracked) server.pending--; return super.json() }
 }
 
 export function usePanelServer(cleanup: () => void) {
@@ -563,14 +607,15 @@ export function usePanelServer(cleanup: () => void) {
     vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit): Promise<Response> => {
       if (server.down) return new Response(null, { status: 404 })
       const address = new URL(url, 'http://127.0.0.1:3082')
-      const path = address.pathname.replace('/orchestrator/api/', '')
+      const remote = address.pathname.startsWith(REMOTE_API)
+      const path = remote ? address.pathname.slice(REMOTE_API.length) : address.pathname.replace('/orchestrator/api/', '')
       const method = init?.method ?? 'GET'
       const body: unknown = init?.body ? JSON.parse(String(init.body)) : undefined
       server.requests.push({ path: decodeURIComponent(`${path}${address.search}`), method, ...body === undefined ? {} : { body } })
       const route = match(method, path.split('/'))
-      if (!route) return new Reply({ error: 'Unknown operation' }, 404)
+      if (!route) return new Reply({ error: 'Unknown operation' }, 404, !remote)
       const answer = await run(route.key, route.params, address.searchParams, body)
-      return answer instanceof Refusal ? new Reply(answer.body, answer.status) : new Reply(answer, 200)
+      return answer instanceof Refusal ? new Reply(answer.body, answer.status, !remote) : new Reply(answer, 200, true)
     }))
   })
   afterEach(() => {

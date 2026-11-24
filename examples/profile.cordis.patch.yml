@@ -10,12 +10,12 @@
 # Feishu is optional: uncomment to enable its Source, then set the bot's lark-cli on the Feishu Source.
 # - id: dsh-superagent-feishu
 #   disabled: false
-# Environment/host UI uses the main plugin's stateDir automatically; leave inventoryFile empty for password hosts.
-# Optional legacy read-only OpenSSH inventory mode (does not merge with UI-managed hosts):
-# Copy examples/remote-ops.inventory.example.json outside the repository and replace the example values.
-# - id: dsh-superagent-remote-ops
-#   config:
-#     inventoryFile: /home/me/.config/dsh/remote-ops.json
-#     timeoutSeconds: 30
-#     maxOutputBytes: 65536
-#     maxConcurrent: 2
+# Existing installations: point at the previous <Superagent stateDir>/remote-ops directory as-is.
+- id: dsh-superagent-remote-ops
+  config:
+    stateDir: /home/me/.dsh/state/superagent/remote-ops
+    # Optional legacy OpenSSH inventory for tools (overrides the managed vault for diagnostics):
+    # inventoryFile: /home/me/.config/dsh/remote-ops.json
+    # timeoutSeconds: 30
+    # maxOutputBytes: 65536
+    # maxConcurrent: 2

@@ -1,6 +1,7 @@
 import { expect, it } from 'vitest'
 import { z } from 'zod'
-import { registerHttp, sameOrigin } from '../src/app/http.ts'
+import { registerHttp } from '../src/app/http.ts'
+import { sameOrigin } from '../src/infra/management-http.ts'
 import { PromptConflict } from '../src/app/prompts.ts'
 import { SettingsConflict } from '../src/app/settings.ts'
 import type { HttpHost } from '../src/app/http.ts'

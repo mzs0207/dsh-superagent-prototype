@@ -49,14 +49,29 @@ const serve = () => vi.stubGlobal('fetch', vi.fn(async (url: string) => {
 }))
 afterEach(() => { vi.unstubAllGlobals() })
 
-it('registers a localized main panel, sidebar entry and Plugin Manager row page, and no settings section', () => {
+it('registers a localized main panel, sidebar entry and Plugin Manager row page', () => {
   const { entries, dictionaries, main, nav } = fixture([])
-  expect(entries.map(entry => entry.options.name)).toEqual(['main', 'sidebar.panellist', 'plugins.row.config'])
-  expect(entries[2]!.options).toMatchObject({ key: 'dsh-superagent#dsh-superagent', locale: 'dshSuperagent' })
+  expect(entries.find(entry => entry.options.name === 'plugins.row.config')?.options)
+    .toMatchObject({ key: 'dsh-superagent#dsh-superagent', locale: 'dshSuperagent' })
   expect(Object.keys(dictionaries)).toEqual(['dshSuperagent'])
   expect(main.options).toMatchObject({ key: 'dsh-superagent', locale: 'dshSuperagent' })
   expect(nav.options).toMatchObject({ id: 'dsh-superagent', order: 10, locale: 'dshSuperagent' })
   expect(nav.options.label?.()).toBe('Superagent')
+})
+
+it('shows environment management inside the DSH settings section without opening a new page', async () => {
+  const { entries } = fixture([])
+  const section = entries.find(entry => entry.options.name === 'settings.section' && entry.options.label?.() === zh['tab.remote'])
+  expect(section, 'Settings has an Environments & hosts section').toBeDefined()
+  vi.stubGlobal('fetch', vi.fn(async (url: string) => url === '/environment-resources/api/remote'
+    ? Response.json({ revision: 3, environments: [{ id: 'test', name: 'Staging', aliases: [], production: false, hosts: [] }] })
+    : Response.json({ error: 'Unexpected endpoint' }, { status: 500 })))
+  const view = await render(section!, { t, close: vi.fn() })
+  try {
+    expect(view.container.querySelector('.dt-remote-nav')?.textContent).toContain('Staging')
+    expect([...view.container.querySelectorAll('button')].some(button => button.textContent?.includes(zh.remoteAddEnvironment))).toBe(true)
+    expect(view.container.querySelector('a[target="_blank"]')).toBeNull()
+  } finally { view.dispose() }
 })
 
 it('opens a listed Session through the workspace from the main panel', async () => {

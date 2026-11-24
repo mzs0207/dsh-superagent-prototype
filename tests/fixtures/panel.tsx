@@ -1,5 +1,5 @@
 /** DOM rendering and interaction helpers for panel tests. */
-import { act } from 'react'
+import { act, type ReactNode } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { expect, vi } from 'vitest'
 import { App } from '../../src/client/app.tsx'
@@ -35,13 +35,14 @@ export async function settle() {
   })
   await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)) })
 }
-export async function mount(dictionary: Record<string, string> = zh) {
+export async function mount(dictionary: Record<string, string> = zh, render?: (t: T) => ReactNode) {
   container = document.createElement('div'); document.body.append(container)
   root = createRoot(container)
-  await act(async () => { root!.render(<Panel t={translator(dictionary)} />) })
+  const t = translator(dictionary)
+  await act(async () => { root!.render(render ? render(t) : <Panel t={t} />) })
   await settle()
 }
-export async function remount(dictionary: Record<string, string> = zh) { unmount(); await mount(dictionary) }
+export async function remount(dictionary: Record<string, string> = zh, render?: (t: T) => ReactNode) { unmount(); await mount(dictionary, render) }
 
 export const all = (selector: string) => [...document.querySelectorAll<HTMLElement>(selector)]
 const CONTROLS = 'button, [role="button"], [role="tab"], [role="switch"], a'

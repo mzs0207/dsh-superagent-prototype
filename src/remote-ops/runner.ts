@@ -115,7 +115,7 @@ export class RemoteOps {
   }
   async inventory() {
     if (!this.options.inventoryFile) return { configured: false, readOnly: true,
-      message: 'Configure inventoryFile on the dsh-superagent/remote-ops plugin; no SSH connection has been attempted.', environments: [] }
+      message: 'Configure stateDir or inventoryFile on dsh-superagent/remote-ops; no SSH connection has been attempted.', environments: [] }
     return { configured: true, readOnly: true, ...inventoryView(await readInventory(this.options.inventoryFile)) }
   }
   inspect(input: unknown, signal: AbortSignal): Promise<unknown> {
@@ -140,7 +140,7 @@ export class RemoteOps {
   }
   private async inspectInner(input: unknown, signal: AbortSignal, managed?: { inventory: Inventory; transport: TargetTransport }) {
     signal.throwIfAborted()
-    if (!managed && !this.options.inventoryFile) throw new Error('Configure remote-ops inventoryFile before inspecting servers')
+    if (!managed && !this.options.inventoryFile) throw new Error('Configure remote-ops stateDir or inventoryFile before inspecting servers')
     const request = InspectSchema.parse(input)
     const inventory = managed?.inventory ?? await readInventory(this.options.inventoryFile)
     signal.throwIfAborted()

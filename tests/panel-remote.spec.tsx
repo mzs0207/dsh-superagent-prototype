@@ -4,16 +4,21 @@ import { act } from 'react'
 import { expect, it, vi } from 'vitest'
 import type { ManagedEnvironment, ManagedHost } from '../src/remote-ops/managed-types.ts'
 import { en, zh } from '../src/client/locales.ts'
-import { parseRoute } from '../src/client/route.ts'
-import { usePanel, mount, remount, settle, all, find, tab, click, type, text, field, at } from './fixtures/panel.tsx'
+import { usePanel, mount as mountPanel, remount as remountPanel, settle, all, find, click, type, text, field, at } from './fixtures/panel.tsx'
 import { server } from './fixtures/panel-server.ts'
+import { RemotePage } from '../src/remote-ops/page.tsx'
+import type { T } from '../src/client/text.ts'
+
+const render = (t: T) => <RemotePage t={t} />
+const mount = (dictionary = zh) => mountPanel(dictionary, render)
+const remount = (dictionary = zh) => remountPanel(dictionary, render)
 
 usePanel()
 const fingerprint = `SHA256:${'a'.repeat(43)}`
 const host = (id = 'host-a', trusted = false): ManagedHost => ({ id, name: id, host: `${id}.example.test`, port: 22, username: 'ops',
   auth: 'password', hasPassword: true, hostKeyFingerprint: trusted ? fingerprint : null, projects: [] })
 const environment = (id = 'env-a', hosts = [host()]): ManagedEnvironment => ({ id, name: id, aliases: [], production: false, hosts })
-const seed = (environments = [environment()]) => { server.remote = { revision: 4, environments }; at({ page: 'remote' }) }
+const seed = (environments = [environment()]) => { server.remote = { revision: 4, environments } }
 const requests = (method: string) => server.requests.filter(request => request.path.startsWith('remote') && request.method === method)
 const input = (label: string) => field<HTMLInputElement>(label)
 const area = (label: string) => field<HTMLTextAreaElement>(label)
@@ -30,10 +35,16 @@ const noStoredPassword = (value: string) => {
   expect(text()).not.toContain(value)
 }
 
-it('has a standalone bilingual remote tab, supports route memory and empty environments', async () => {
-  expect(parseRoute({ page: 'remote', query: { group: 'deployment' }, id: 'ignored' })).toEqual({ page: 'remote' })
+it('drops the previous Superagent tab and ignores its persisted route', async () => {
+  at({ page: 'remote' })
+  await mountPanel()
+  expect(all('[role="tab"]').some(element => element.textContent === zh['tab.remote'])).toBe(false)
+  expect(document.querySelector('a[href="/environment-resources"]')).toBeNull()
+  expect(requests('GET')).toHaveLength(0)
+})
+
+it('manages empty environments in the standalone page without loading Superagent', async () => {
   await mount()
-  await click(tab(zh['tab.remote']))
   expect(text()).toContain(zh.remoteNoEnvironments)
   expect(all('.dt-settings-link')).toHaveLength(0)
   await click(zh.remoteAddEnvironment)
@@ -41,11 +52,12 @@ it('has a standalone bilingual remote tab, supports route memory and empty envir
   await type(area(zh.remoteAliases), 'stage\nstg')
   await click(zh.save)
   expect(server.remote).toMatchObject({ revision: 1, environments: [{ name: 'Staging', aliases: ['stage', 'stg'], hosts: [] }] })
-  expect(text()).toContain(zh.remoteNoHosts)
+  expect(text()).toContain(zh.remoteNoResources)
   expect(requests('POST')[0]?.body).toEqual({ revision: 0, name: 'Staging', aliases: ['stage', 'stg'], production: false })
   await remount(en)
-  expect(tab(en['tab.remote']).getAttribute('aria-selected')).toBe('true')
-  expect(text()).toContain(en.remoteNoHosts)
+  expect(text()).toContain(en['tab.remote'])
+  expect(server.requests.some(request => request.path === 'state')).toBe(false)
+  expect(text()).toContain(en.remoteNoResources)
 })
 
 it('creates a password host with ordered Compose files, edits without echoing the old password and clears cancellations', async () => {
@@ -119,7 +131,7 @@ it('edits environments, removes project rows and confirms host/environment delet
   await click(buttonIn(card('new-name'), zh.remove))
   await click(zh.remoteDeleteConfirm)
   expect(requests('DELETE')[0]?.body).toEqual({ revision: 7 })
-  expect(text()).toContain(zh.remoteNoHosts)
+  expect(text()).toContain(zh.remoteNoResources)
   await click(zh.remove)
   await click(zh.remoteDeleteConfirm)
   expect(requests('DELETE')[1]?.body).toEqual({ revision: 8 })
@@ -196,7 +208,7 @@ it('rejects stale saves explicitly, never silently retries and only refreshes on
   expect(requests('PUT').at(-1)?.body).toMatchObject({ revision: 5, name: 'compared edit' })
 })
 
-it('clears secrets on environment/tab/unmount switches and ignores old probe/test results for a new target', async () => {
+it('clears secrets on environment and unmount switches and ignores old probe/test results for a new target', async () => {
   seed([environment('env-a', [host('host-a', true)]), environment('env-b', [host('host-b', true)])])
   await mount()
   await click(zh.remoteEditHost)
@@ -206,11 +218,6 @@ it('clears secrets on environment/tab/unmount switches and ignores old probe/tes
   expect(switched.value).toBe('')
   await click(zh.remoteEditHost)
   expect(input(zh.remotePassword).value).toBe('')
-  await type(input(zh.remotePassword), 'tab-secret')
-  const tabbed = input(zh.remotePassword)
-  await click(tab(zh['tab.overview']))
-  expect(tabbed.value).toBe('')
-  await click(tab(zh['tab.remote']))
   const hold = deferred()
   server.remoteWaiting = async (operation, id) => { if (operation === 'probe' && id === 'host-a') await hold.promise }
   await click('env-a')
@@ -233,7 +240,7 @@ it('clears secrets on environment/tab/unmount switches and ignores old probe/tes
   const unmounted = input(zh.remotePassword)
   await remount()
   expect(unmounted.value).toBe('')
-  noStoredPassword('switch-secret'); noStoredPassword('tab-secret'); noStoredPassword('unmount-secret')
+  noStoredPassword('switch-secret'); noStoredPassword('unmount-secret')
 })
 
 it('isolates concurrent host probes within one environment and ignores a probe after switching to another host editor', async () => {
@@ -286,4 +293,51 @@ it('shows loading/retry errors, disables pending saves and never reflects a faul
   await act(async () => { delayed.resolve() }); await settle()
   expect(text()).toContain(zh.remoteInvalid)
   noStoredPassword('faulty-echo-secret')
+})
+
+it('records a website account separately from host fields and displays its notes without its password', async () => {
+  seed([environment('staging', [])])
+  await mount()
+  await click('新增网站账号')
+  const form = document.querySelector('form[aria-label="新增网站账号"]')
+  expect(form?.querySelector('[name=role], [name=webPaths], [name=apiPaths]')).toBeNull()
+  await type(input('资源名称'), 'OMS verifier')
+  const origin = input(zh.remoteWebOrigin)
+  await type(origin, 'http://oms.example.invalid')
+  await type(input('登录邮箱'), 'test@example.invalid')
+  await type(input('资源密码'), 'never-return-account-password')
+  await type(area('备注'), '退款场景，只读验证')
+  await click(zh.save)
+  expect(requests('POST')).toHaveLength(0)
+  expect(document.querySelector('[role="alert"]')?.textContent).toContain('公网地址必须使用 HTTPS')
+  expect(origin.getAttribute('aria-invalid')).toBe('true')
+  expect(input('资源密码').value).toBe('never-return-account-password')
+  await type(origin, 'https://oms.example.invalid/login')
+  await click(zh.save)
+  expect(requests('POST')).toHaveLength(0)
+  expect(document.querySelector('[role="alert"]')?.textContent).toContain('不要带路径')
+  await type(origin, 'http://192.168.77.10')
+  const detached = input('资源密码')
+  await click(zh.save)
+  expect(requests('POST').at(-1)?.body).toMatchObject({ type: 'website-account', origin: 'http://192.168.77.10', notes: '退款场景，只读验证' })
+  expect(text()).toContain('退款场景，只读验证')
+  expect(detached.value).toBe('')
+  noStoredPassword('never-return-account-password')
+})
+
+it('accepts a ZenTao username and installation path without adding per-account path lists', async () => {
+  seed([environment('staging', [])])
+  await mount()
+  await click('新增网站账号')
+  await type(field<HTMLSelectElement>('登录系统'), 'zentao')
+  await type(input('资源名称'), 'ZenTao QA')
+  await type(input(zh.remoteWebOrigin), 'http://192.168.77.10:8080/zentao')
+  await type(input('登录用户名'), 'qa_user')
+  await type(input('资源密码'), 'fixture-credential')
+  await click(zh.save)
+  expect(requests('POST').at(-1)?.body).toMatchObject({
+    system: 'zentao', origin: 'http://192.168.77.10:8080/zentao', username: 'qa_user',
+  })
+  expect(text()).toContain('ZenTao QA')
+  noStoredPassword('fixture-credential')
 })

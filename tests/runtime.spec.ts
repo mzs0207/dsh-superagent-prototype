@@ -171,7 +171,8 @@ beforeEach(async () => {
       const preset = {}
       const inherited = ['bash', 'read', 'read_image', 'skill', 'job_output', 'job_list', 'job_kill', 'grep', 'web_search',
         'ask_user_question', 'plugin_manager', 'schedule_create', 'create_goal', 'session_create', 'session_send_message', 'feishu_doc_edit',
-        ...(remoteToolsInstalled ? ['remote_ops_inventory', 'remote_ops_inspect'] : [])]
+        ...(remoteToolsInstalled ? ['remote_ops_inventory', 'remote_ops_inspect', 'remote_ops_resources', 'remote_ops_resource_check',
+          'remote_ops_resource_login', 'remote_ops_resource_read'] : [])]
       const sessionTools = new Map<string, RegisteredTool>()
       tools.set(sessionId, sessionTools)
       agentCtx.reflect.provide('tools', { register: (tool: RegisteredTool) => { sessionTools.set(tool.name,
@@ -1591,9 +1592,14 @@ it('allows installed read-only diagnostic tools on workers, but not on the route
   remoteToolsInstalled = true
   const { ticket, sessionId } = await acceptedTicket()
   const rules = restricts.get(sessionId) as { allow: string[] }[]
-  expect(rules[0]!.allow).toEqual(expect.arrayContaining(['remote_ops_inventory', 'remote_ops_inspect']))
+  expect(rules[0]!.allow).toEqual(expect.arrayContaining([
+    'remote_ops_inventory', 'remote_ops_inspect', 'remote_ops_resources', 'remote_ops_resource_check', 'remote_ops_resource_login', 'remote_ops_resource_read',
+  ]))
   const router = restricts.get(runtime.masterId) as { allow: string[] }[]
   expect(router[0]!.allow).not.toContain('remote_ops_inspect')
+  expect(router[0]!.allow).not.toContain('remote_ops_resource_check')
+  expect(router[0]!.allow).not.toContain('remote_ops_resource_login')
+  expect(router[0]!.allow).not.toContain('remote_ops_resource_read')
   expect(guards.get(sessionId)!()).toBeUndefined()
   runtime.engine.stopTicket(ticket.id)
   expect(guards.get(sessionId)!()).toBe('Ticket ended; new work needs a new authorized ticket')

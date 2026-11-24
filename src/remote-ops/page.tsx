@@ -1,28 +1,49 @@
-/** Password-only remote inventory management. Secrets live only in the mounted host editor, never in drafts or storage. */
-import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
-import type { ConnectionTest, HostKeyProbe, HostWrite, ManagedEnvironment, ManagedHost, ManagedProject, ManagedView } from '../remote-ops/managed-types.ts'
-import { ApiError } from './api.ts'
-import { Button, Icon, Input, Tag } from './controls.tsx'
-import { usePanel } from './provider.tsx'
-import { Field, Fields } from './settings-kit.tsx'
-import type { T } from './text.ts'
-import { Hint, Section } from './widgets.tsx'
+/** Environment inventory management; password inputs are cleared on submission or unmount. */
+import { createContext, useCallback, useContext, useEffect, useId, useRef, useState, type FormEvent } from 'react'
+import type { ConnectionTest, HostKeyProbe, HostWrite, ManagedEnvironment, ManagedHost, ManagedProject, ManagedResource,
+  ManagedView, ResourceAction, ResourceWrite } from './managed-types.ts'
+import { Button, Icon, Input, Tag } from '../client/controls.tsx'
+import { Field, Fields } from '../client/settings-kit.tsx'
+import type { T } from '../client/text.ts'
+import { Hint, Section } from '../client/widgets.tsx'
+import { isWebsiteAddress, REMOTE_API, WEBSITE_SYSTEMS, type RemoteApi, type RemoteRequest, type WebsiteSystem } from './api.ts'
+
+/** HTTP status only: never read or relay untrusted error bodies from a credential-submitting request. */
+class RemoteRequestError extends Error { constructor(readonly status: number) { super('Environment management request failed') } }
+
+async function call<K extends keyof RemoteApi>(route: K, ...[request]: {} extends RemoteRequest<K> ? [request?: RemoteRequest<K>] : [request: RemoteRequest<K>])
+  : Promise<RemoteApi[K]['response']> {
+  const [method, pattern] = route.split(' ') as [string, string]
+  const values = (request ?? {}) as Record<string, unknown>
+  const path = pattern.replace(/:(\w+)/g, (_match, name: string) => encodeURIComponent(String(values[name])))
+  const response = await fetch(`${REMOTE_API}${path}`, { method, headers: { 'x-orchestrator-request': '1',
+    ...values.body === undefined ? {} : { 'content-type': 'application/json' } },
+  ...values.body === undefined ? {} : { body: JSON.stringify(values.body) } })
+  if (!response.ok) {
+    void response.body?.cancel().catch(() => undefined)
+    const missingRoute = response.status === 404 && !response.headers.get('content-type')?.startsWith('application/json')
+    throw new RemoteRequestError(missingRoute ? 0 : response.status)
+  }
+  return response.json()
+}
+
+const Language = createContext<T>(key => key)
 
 type Commit = (write: () => Promise<ManagedView>, selectNew?: boolean) => Promise<boolean>
 interface Actions { commit: Commit; disabled: boolean; conflict: () => void }
 const lines = (value: string) => value.split(/\r?\n/).map(item => item.trim()).filter(Boolean)
 // Never reflect server error bodies: even a faulty server must not echo a submitted password into the UI/toasts.
-const failureText = (t: T, failure: unknown) => t(failure instanceof ApiError && failure.status === 409 ? 'remoteConflict'
-  : failure instanceof ApiError && failure.status === 400 ? 'remoteInvalid'
-    : failure instanceof ApiError && failure.missing ? 'remoteMissing' : 'remoteFailed')
+const failureText = (t: T, failure: unknown) => t(failure instanceof RemoteRequestError && failure.status === 409 ? 'remoteConflict'
+  : failure instanceof RemoteRequestError && failure.status === 400 ? 'remoteInvalid'
+    : failure instanceof RemoteRequestError && failure.status === 404 ? 'remoteMissing' : 'remoteFailed')
 
 function DeleteInline({ name, environment, disabled, remove }: {
   name: string; environment?: boolean; disabled: boolean; remove: () => Promise<boolean>
 }) {
-  const { t } = usePanel()
+  const t = useContext(Language)
   const [open, setOpen] = useState(false)
   return open ? <div className="dt-remote-confirm" role="group" aria-label={t('remoteDeleteConfirm')}>
-    <p className="dt-hint">{t(environment ? 'remoteDeleteEnvironmentHint' : 'remoteDeleteHostHint', { name })}</p>
+    <p className="dt-hint">{t(environment ? 'remoteDeleteEnvironmentHint' : 'remoteDeleteResourceHint', { name })}</p>
     <div className="dt-actions">
       <Button variant="outline" size="sm" disabled={disabled} onClick={() => { void remove() }}>{t('remoteDeleteConfirm')}</Button>
       <Button size="sm" disabled={disabled} onClick={() => setOpen(false)}>{t('cancel')}</Button>
@@ -34,7 +55,7 @@ function DeleteInline({ name, environment, disabled, remove }: {
 function EnvironmentEditor({ environment, revision, actions, onCancel }: {
   environment?: ManagedEnvironment; revision: number; actions: Actions; onCancel: () => void
 }) {
-  const { t, call } = usePanel()
+  const t = useContext(Language)
   const [name, setName] = useState(environment?.name ?? '')
   const [aliases, setAliases] = useState(environment?.aliases.join('\n') ?? '')
   const [production, setProduction] = useState(environment?.production ?? false)
@@ -70,8 +91,9 @@ const projectWrite = ({ files, profiles, projectName, ...project }: ProjectDraft
 function HostEditor({ host, environment, revision, actions, onCancel }: {
   host?: ManagedHost; environment: string; revision: number; actions: Actions; onCancel: () => void
 }) {
-  const { t, call } = usePanel()
+  const t = useContext(Language)
   const [name, setName] = useState(host?.name ?? '')
+  const [notes, setNotes] = useState(host?.notes ?? '')
   const [address, setAddress] = useState(host?.host ?? '')
   const [port, setPort] = useState(String(host?.port ?? 22))
   const [username, setUsername] = useState(host?.username ?? '')
@@ -89,7 +111,7 @@ function HostEditor({ host, environment, revision, actions, onCancel }: {
   const submit = (event: FormEvent) => {
     event.preventDefault()
     if (actions.disabled || (!host && !password)) return
-    const body: HostWrite = { revision, name, host: address, port: Number(port), username, ...password ? { password } : {},
+    const body: HostWrite = { revision, name, host: address, port: Number(port), username, ...(notes || host?.notes ? { notes } : {}), ...password ? { password } : {},
       projects: projects.map(projectWrite) }
     // Do not retain a submitted credential while the request is in flight (or after failure).
     setPassword('')
@@ -112,6 +134,8 @@ function HostEditor({ host, environment, revision, actions, onCancel }: {
       <Field label={t('remotePassword')} note={t(host ? 'remotePasswordKeep' : 'remotePasswordRequired')}>
         <Input type="password" required={!host} maxLength={4096} autoComplete="new-password" value={password}
           onChange={event => setPassword(event.target.value)} /></Field>
+      <Field label={t('remoteNotes')} note={t('remoteNotesHint')}><textarea className="dt-textarea" maxLength={2000}
+        value={notes} onChange={event => setNotes(event.target.value)} /></Field>
       <Hint>{t('remotePasswordOnly')}</Hint>
       <Section title={t('remoteProjects')} count={projects.length} action={<Button size="sm" icon={<Icon name="plus" />}
         onClick={() => setProjects(previous => [...previous, { id: '', directory: '', files: '', profiles: '' }])}>{t('remoteAddProject')}</Button>}>
@@ -144,7 +168,7 @@ function HostEditor({ host, environment, revision, actions, onCancel }: {
 function HostCard({ host, environment, revision, actions, onEdit }: {
   host: ManagedHost; environment: string; revision: number; actions: Actions; onEdit: () => void
 }) {
-  const { t, call } = usePanel()
+  const t = useContext(Language)
   const [probe, setProbe] = useState<HostKeyProbe>()
   const [verified, setVerified] = useState(false)
   const [expired, setExpired] = useState(false)
@@ -169,7 +193,7 @@ function HostCard({ host, environment, revision, actions, onEdit }: {
     catch (failure) {
       if (live.current) {
         setError(failureText(t, failure))
-        if (failure instanceof ApiError && failure.status === 409) actions.conflict()
+        if (failure instanceof RemoteRequestError && failure.status === 409) actions.conflict()
       }
     } finally { if (live.current) setPending(false); running.current = false }
   }
@@ -178,7 +202,8 @@ function HostCard({ host, environment, revision, actions, onEdit }: {
   return <article className="dt-card dt-remote-host" aria-label={host.name}>
     <div className="dt-card-head"><div className="dt-row-main"><h3 className="dt-block-title">{host.name}</h3>
       <span className="dt-hint dt-mono">{host.username}@{host.host}:{host.port}</span></div>
-      <Tag>{t('remotePasswordAuth')}</Tag></div>
+      <Tag>{t('remoteLinux')}</Tag></div>
+    {host.notes && <Hint>{host.notes}</Hint>}
     <Hint>{t('remoteFingerprint')}</Hint>
     <code className="dt-mono">{host.hostKeyFingerprint ?? t('remoteUntrusted')}</code>
     <Fields disabled={disabled}>
@@ -224,10 +249,142 @@ function HostCard({ host, environment, revision, actions, onEdit }: {
   </article>
 }
 
+function ResourceEditor({ type, resource, environment, revision, actions, onCancel }: {
+  type: ManagedResource['type']; resource?: ManagedResource; environment: string; revision: number; actions: Actions; onCancel: () => void
+}) {
+  const t = useContext(Language), form = useRef<HTMLFormElement>(null)
+  const originFeedback = useId()
+  const [invalidOrigin, setInvalidOrigin] = useState(false)
+  const pg = resource?.type === 'postgresql' ? resource : undefined
+  const web = resource?.type === 'website-account' ? resource : undefined
+  const [system, setSystem] = useState<WebsiteSystem>(web?.system ?? 'oms')
+  const [termsAccepted, setTermsAccepted] = useState(web?.communityTermsAccepted === true)
+  useEffect(() => {
+    const input = form.current?.querySelector<HTMLInputElement>('input[type="password"]')
+    return () => { if (input) { input.value = ''; input.defaultValue = '' } }
+  }, [])
+  const title = resource ? 'remoteEditResource' : type === 'postgresql' ? 'remoteAddPostgres' : 'remoteAddWebsite'
+  const submit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    if (actions.disabled) return
+    if (type === 'website-account') {
+      const origin = event.currentTarget.elements.namedItem('origin') as HTMLInputElement
+      if (!isWebsiteAddress(origin.value, system)) {
+        setInvalidOrigin(true)
+        origin.focus()
+        return
+      }
+    }
+    const data = new FormData(event.currentTarget)
+    const field = (name: string) => String(data.get(name) ?? '')
+    const password = field('password')
+    if (!resource && !password) return
+    const input = event.currentTarget.elements.namedItem('password') as HTMLInputElement
+    input.value = ''
+    const fields = { revision, name: field('name'), username: field('username'), notes: field('notes'),
+      allowWorker: data.has('allowWorker'), ...(password ? { password } : {}) }
+    const body: ResourceWrite = type === 'postgresql'
+      ? { ...fields, type, host: field('host'), port: Number(field('port')), database: field('database'), ca: field('ca') }
+      : { ...fields, type, system, origin: field('origin'),
+          ...(system === 'community' && termsAccepted ? { communityTermsAccepted: true } : {}) }
+    void actions.commit(() => resource ? call('PUT remote/environments/:environment/resources/:resource', { environment, resource: resource.id, body })
+      : call('POST remote/environments/:environment/resources', { environment, body }))
+  }
+  return <form ref={form} className="dt-form dt-card" aria-label={t(title)} onSubmit={submit} autoComplete="off">
+    <Fields disabled={actions.disabled}>
+      <h3 className="dt-block-title">{t(title)} <Tag>{t(type === 'postgresql' ? 'remotePostgres' : 'remoteWebsite')}</Tag></h3>
+      <Field label={t('remoteResourceName')}><Input name="name" required maxLength={100} defaultValue={resource?.name} /></Field>
+      {type === 'postgresql' ? <>
+        <div className="dt-remote-endpoint">
+          <Field label={t('remoteAddress')}><Input name="host" required maxLength={253} defaultValue={pg?.host} /></Field>
+          <Field label={t('remoteDbPort')}><Input name="port" type="number" required min={1} max={65535} defaultValue={pg?.port ?? 5432} /></Field>
+        </div>
+        <Field label={t('remoteDbName')}><Input name="database" required maxLength={100} defaultValue={pg?.database} /></Field>
+        <Field label={t('remoteDbUsername')}><Input name="username" required maxLength={100} defaultValue={pg?.username} /></Field>
+        <Field label={t('remoteDbCa')}><textarea className="dt-textarea" name="ca" rows={3} maxLength={32768} defaultValue={pg?.ca} /></Field>
+      </> : <>
+        <Field label={t('remoteWebsiteSystem')}>
+          <select name="system" className="dt-input" value={system} onChange={event => {
+            const next = WEBSITE_SYSTEMS.find(value => value === event.target.value)
+            if (next) setSystem(next)
+            setInvalidOrigin(false)
+            setTermsAccepted(false)
+          }}>
+            {WEBSITE_SYSTEMS.map(value => <option key={value} value={value}>{t(`remoteSite.${value}`)}</option>)}
+          </select>
+        </Field>
+        <Field label={t('remoteWebOrigin')} note={<span id={originFeedback} role={invalidOrigin ? 'alert' : undefined}
+          className={invalidOrigin ? 'dt-error' : undefined}>{t(system === 'zentao' ? 'remoteZentaoAddressHint' : 'remoteWebOriginHint')}</span>}>
+          <Input name="origin" type="url" required maxLength={250} defaultValue={web?.origin} aria-describedby={originFeedback}
+            aria-invalid={invalidOrigin || undefined} onChange={() => { setInvalidOrigin(false); setTermsAccepted(false) }} />
+        </Field>
+        <Field label={t(system === 'zentao' ? 'remoteWebsiteUsername' : 'remoteWebUser')}>
+          <Input name="username" type={system === 'zentao' ? 'text' : 'email'} required maxLength={254} defaultValue={web?.username} />
+        </Field>
+        {system === 'community' && <label className="dt-remote-check"><input type="checkbox" checked={termsAccepted}
+          onChange={event => setTermsAccepted(event.target.checked)} />{t('remoteCommunityTerms')}</label>}
+      </>}
+      <Field label={t('remoteResourcePassword')} note={t('remoteResourcePasswordRequired')}>
+        <Input name="password" type="password" required={!resource} maxLength={4096} autoComplete="new-password" />
+      </Field>
+      <Field label={t('remoteNotes')} note={t('remoteNotesHint')}><textarea className="dt-textarea" name="notes" rows={3} maxLength={2000}
+        defaultValue={resource?.notes} /></Field>
+      <label className="dt-remote-check"><input type="checkbox" name="allowWorker" defaultChecked={resource?.allowWorker} />{t('remoteAllowWorker')}</label>
+      <div className="dt-actions"><Button type="submit" variant="primary">{t('save')}</Button><Button onClick={onCancel}>{t('cancel')}</Button></div>
+    </Fields>
+  </form>
+}
+
+function ResourceCard({ resource, environment, revision, actions, onEdit }: {
+  resource: ManagedResource; environment: ManagedEnvironment; revision: number; actions: Actions; onEdit: () => void
+}) {
+  const t = useContext(Language)
+  const [pending, setPending] = useState<ResourceAction>()
+  const [result, setResult] = useState<ConnectionTest>()
+  const [error, setError] = useState<string>()
+  const params = { environment: environment.id, resource: resource.id }
+  const check = async (action: ResourceAction) => {
+    if (pending || actions.disabled || environment.production) return
+    setPending(action); setError(undefined); setResult(undefined)
+    try { setResult(await call('POST remote/environments/:environment/resources/:resource/check', { ...params, body: { revision, action } })) }
+    catch (failure) {
+      setError(failureText(t, failure))
+      if (failure instanceof RemoteRequestError && failure.status === 409) actions.conflict()
+    } finally { setPending(undefined) }
+  }
+  const disabled = actions.disabled || pending !== undefined
+  const termsRequired = resource.type === 'website-account' && resource.system === 'community' && !resource.communityTermsAccepted
+  return <article className="dt-card dt-remote-host" aria-label={resource.name}>
+    <div className="dt-card-head"><div className="dt-row-main"><h3 className="dt-block-title">{resource.name}</h3>
+      <span className="dt-hint dt-mono">{resource.type === 'postgresql' ? `${resource.host}:${resource.port}/${resource.database}`
+        : `${resource.origin} · ${resource.username}`}</span></div>
+      <Tag>{resource.type === 'postgresql' ? t('remotePostgres') : t(`remoteSite.${resource.system}`)}</Tag></div>
+    {resource.notes && <Hint>{resource.notes}</Hint>}
+    <div className="dt-actions">
+      {resource.type === 'postgresql' ? <Button size="sm" disabled={disabled || environment.production}
+        onClick={() => { void check('database') }}>{t('remoteTest')}</Button> : <>
+        <Button size="sm" disabled={disabled || environment.production || termsRequired} onClick={() => { void check('web') }}>{t('remoteTestWeb')}</Button>
+        <Button size="sm" disabled={disabled || environment.production} onClick={() => { void check('api') }}>{t('remoteTestApi')}</Button>
+      </>}
+      <Button size="sm" disabled={disabled} onClick={onEdit}>{t('remoteEditResource')}</Button>
+      <DeleteInline name={resource.name} disabled={disabled}
+        remove={() => actions.commit(() => call('DELETE remote/environments/:environment/resources/:resource', { ...params, body: { revision } }))} />
+    </div>
+    {termsRequired && <Hint>{t('remoteCommunityTermsRequired')}</Hint>}
+    {pending && <Hint>{t('remotePending')}</Hint>}
+    {error && <p className="dt-error" role="alert">{error}</p>}
+    {result && <p className={result.ok ? 'dt-hint' : 'dt-error'} role="status">{t(result.ok ? 'remoteTestOk' : 'remoteResourceTestFailed',
+      { duration: result.durationMs })}</p>}
+  </article>
+}
+
 function EnvironmentPanel({ environment, revision, actions }: { environment: ManagedEnvironment; revision: number; actions: Actions }) {
-  const { t, call } = usePanel()
+  const t = useContext(Language)
   const [editor, setEditor] = useState<'environment' | 'new' | string>()
   const editingHost = environment.hosts.find(host => host.id === editor)
+  const resources = environment.resources ?? []
+  const editingResource = resources.find(resource => resource.id === editor)
+  const resourceType = editingResource?.type ?? (editor === 'postgresql' || editor === 'website-account' ? editor : undefined)
   return <div className="dt-remote-main">
     {editor === 'environment' ? <EnvironmentEditor environment={environment} revision={revision} actions={actions}
       onCancel={() => setEditor(undefined)} /> : <Section title={environment.name}
@@ -238,19 +395,33 @@ function EnvironmentPanel({ environment, revision, actions }: { environment: Man
       </div>}>
       {!!environment.aliases.length && <Hint>{t('remoteAliases')}: {environment.aliases.join(' · ')}</Hint>}
     </Section>}
-    {editor !== 'environment' && <Section title={t('remoteHosts')} count={environment.hosts.length}
-      action={<Button size="sm" icon={<Icon name="plus" />} disabled={actions.disabled || editor !== undefined}
-        onClick={() => setEditor('new')}>{t('remoteAddHost')}</Button>}>
+    {editor !== 'environment' && <Section title={t('remoteResources')} count={environment.hosts.length + resources.length}
+      action={<div className="dt-actions">
+        <Button size="sm" icon={<Icon name="plus" />} disabled={actions.disabled || editor !== undefined}
+          onClick={() => setEditor('new')}>{t('remoteAddHost')}</Button>
+        <Button size="sm" disabled={actions.disabled || editor !== undefined} onClick={() => setEditor('postgresql')}>{t('remoteAddPostgres')}</Button>
+        <Button size="sm" disabled={actions.disabled || editor !== undefined} onClick={() => setEditor('website-account')}>{t('remoteAddWebsite')}</Button>
+      </div>}>
       {editor === 'new' || editingHost ? <HostEditor key={editor} host={editingHost} environment={environment.id} revision={revision}
-        actions={actions} onCancel={() => setEditor(undefined)} /> : environment.hosts.length ? environment.hosts.map(host =>
-        <HostCard key={host.id} host={host} environment={environment.id} revision={revision} actions={actions}
-          onEdit={() => setEditor(host.id)} />) : <Hint>{t('remoteNoHosts')}</Hint>}
+        actions={actions} onCancel={() => setEditor(undefined)} /> : resourceType
+        ? <ResourceEditor key={editor} type={resourceType} resource={editingResource} environment={environment.id} revision={revision}
+          actions={actions} onCancel={() => setEditor(undefined)} /> : <>
+          {environment.hosts.map(host => <HostCard key={host.id} host={host} environment={environment.id} revision={revision}
+            actions={actions} onEdit={() => setEditor(host.id)} />)}
+          {resources.map(resource => <ResourceCard key={resource.id} resource={resource} environment={environment} revision={revision}
+            actions={actions} onEdit={() => setEditor(resource.id)} />)}
+          {!environment.hosts.length && !resources.length && <Hint>{t('remoteNoResources')}</Hint>}
+        </>}
     </Section>}
   </div>
 }
 
-export function RemotePage() {
-  const { t, call } = usePanel()
+export function RemotePage({ t }: { t: T }) {
+  return <Language.Provider value={t}><Inventory /></Language.Provider>
+}
+
+function Inventory() {
+  const t = useContext(Language)
   const [view, setView] = useState<ManagedView>()
   const [selected, setSelected] = useState<string>()
   const [creating, setCreating] = useState(false)
@@ -286,7 +457,7 @@ export function RemotePage() {
         : next.environments.some(item => item.id === current) ? current : next.environments[0]?.id)
       return true
     } catch (failure) {
-      if (live.current) { setError(failureText(t, failure)); if (failure instanceof ApiError && failure.status === 409) setConflict(true) }
+      if (live.current) { setError(failureText(t, failure)); if (failure instanceof RemoteRequestError && failure.status === 409) setConflict(true) }
       return false
     } finally { writing.current = false; if (live.current) setBusy(false) }
   }
@@ -303,7 +474,7 @@ export function RemotePage() {
       <nav className="dt-remote-nav" aria-label={t('remoteEnvironments')}>
         {view.environments.map(item => <button type="button" key={item.id} aria-label={item.name} disabled={busy || loading} className="dt-nav-item" aria-current={!creating
           && item.id === selected ? 'true' : undefined} onClick={() => { setCreating(false); setSelected(item.id); setEpoch(value => value + 1) }}>
-          <span>{item.name}</span><span className="dt-count">{item.hosts.length}</span>
+          <span>{item.name}</span><span className="dt-count">{item.hosts.length + (item.resources?.length ?? 0)}</span>
         </button>)}
         <Button size="sm" icon={<Icon name="plus" />} disabled={actions.disabled} onClick={() => setCreating(true)}>
           {t('remoteAddEnvironment')}</Button>
