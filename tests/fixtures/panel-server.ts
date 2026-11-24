@@ -316,18 +316,22 @@ function remoteWrite(revision: number, write: () => void | Refusal): ManagedView
 function saveRemoteResource(environmentId: string, input: unknown, id?: string) {
   const parsed = ResourceWriteSchema.safeParse(input)
   if (!parsed.success) return refuse(400, 'Invalid resource')
-  const { revision, password, ...fields } = parsed.data
+  const { revision, password, ...submitted } = parsed.data
   return remoteWrite(revision, () => {
     const environment = remoteEnvironment(environmentId)
     if (!environment) return refuse(404, 'Environment not found')
     const resources = environment.resources ??= []
+    const index = id === undefined ? -1 : resources.findIndex(resource => resource.id === id)
+    const previous = resources[index]
+    const fields = submitted.type === 'postgresql'
+      ? { ...submitted, tls: submitted.tls ?? (previous?.type === 'postgresql' && previous.tls) }
+      : submitted
     if (id === undefined) {
       if (!password) return refuse(400, 'Password required')
       const created = crypto.randomUUID()
       resources.push({ ...fields, id: created, hasPassword: true })
       server.remotePasswords[created] = password
     } else {
-      const index = resources.findIndex(resource => resource.id === id)
       if (index < 0) return refuse(404, 'Resource not found')
       resources[index] = { ...fields, id, hasPassword: true }
       if (password) server.remotePasswords[id] = password

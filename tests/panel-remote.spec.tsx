@@ -295,6 +295,28 @@ it('shows loading/retry errors, disables pending saves and never reflects a faul
   noStoredPassword('faulty-echo-secret')
 })
 
+it('lets an operator enable database TLS without re-entering the stored password or certificate', async () => {
+  seed([environment('staging', [])])
+  await mount()
+  await click(zh.remoteAddPostgres)
+  const tls = () => checkbox('使用 TLS')
+  expect(tls().checked).toBe(false)
+  await type(input(zh.remoteResourceName), 'QA Database')
+  await type(input(zh.remoteAddress), 'db.example.invalid')
+  await type(input(zh.remoteDbName), 'app')
+  await type(input(zh.remoteDbUsername), 'reader')
+  await type(area(zh.remoteDbCa), 'fixture CA')
+  await type(input(zh.remoteResourcePassword), 'fixture-credential')
+  await click(zh.save)
+  await click(zh.remoteEditResource)
+  expect(tls().checked).toBe(false)
+  expect(input(zh.remoteResourcePassword).value).toBe('')
+  await click(tls())
+  await click(zh.save)
+  expect(requests('PUT').at(-1)?.body).toMatchObject({ tls: true, ca: 'fixture CA' })
+  expect(requests('PUT').at(-1)?.body).not.toHaveProperty('password')
+})
+
 it('records a website account separately from host fields and displays its notes without its password', async () => {
   seed([environment('staging', [])])
   await mount()

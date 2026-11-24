@@ -284,7 +284,7 @@ function ResourceEditor({ type, resource, environment, revision, actions, onCanc
     const fields = { revision, name: field('name'), username: field('username'), notes: field('notes'),
       allowWorker: data.has('allowWorker'), ...(password ? { password } : {}) }
     const body: ResourceWrite = type === 'postgresql'
-      ? { ...fields, type, host: field('host'), port: Number(field('port')), database: field('database'), ca: field('ca') }
+      ? { ...fields, type, host: field('host'), port: Number(field('port')), database: field('database'), tls: data.has('tls'), ca: field('ca') }
       : { ...fields, type, system, origin: field('origin'),
           ...(system === 'community' && termsAccepted ? { communityTermsAccepted: true } : {}) }
     void actions.commit(() => resource ? call('PUT remote/environments/:environment/resources/:resource', { environment, resource: resource.id, body })
@@ -301,6 +301,8 @@ function ResourceEditor({ type, resource, environment, revision, actions, onCanc
         </div>
         <Field label={t('remoteDbName')}><Input name="database" required maxLength={100} defaultValue={pg?.database} /></Field>
         <Field label={t('remoteDbUsername')}><Input name="username" required maxLength={100} defaultValue={pg?.username} /></Field>
+        <label className="dt-remote-check"><input type="checkbox" name="tls" defaultChecked={pg?.tls ?? false} />{t('remoteDbTls')}</label>
+        <Hint>{t('remoteDbTlsHint')}</Hint>
         <Field label={t('remoteDbCa')}><textarea className="dt-textarea" name="ca" rows={3} maxLength={32768} defaultValue={pg?.ca} /></Field>
       </> : <>
         <Field label={t('remoteWebsiteSystem')}>

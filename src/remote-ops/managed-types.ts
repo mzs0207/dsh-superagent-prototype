@@ -15,7 +15,7 @@ const NotesSchema = z.string().trim().max(2000).refine(value => !/[\u0000-\u0008
 const shared = { name: clean(100), notes: NotesSchema, allowWorker: z.boolean().default(false) }
 export const PostgresResourceSchema = z.object({ ...shared, type: z.literal('postgresql'), host: AddressSchema,
   port: z.number().int().min(1).max(65535).default(5432), database: clean(100), username: clean(100),
-  ca: z.string().trim().max(32768).default('') }).strict()
+  tls: z.boolean().default(true), ca: z.string().trim().max(32768).default('') }).strict()
 const ReadPath = z.string().max(1024).refine(value => {
   const path = value.split('?', 1)[0]!
   // Canonical root-relative path only: no second authority, escaped separators or dot segments.
@@ -37,7 +37,7 @@ export const WebsiteResourceSchema = z.object({ ...shared, type: z.literal('webs
   }
 })
 export const ResourceWriteSchema = z.discriminatedUnion('type', [
-  PostgresResourceSchema.extend({ revision: RevisionSchema, password: PasswordSchema }),
+  PostgresResourceSchema.extend({ tls: z.boolean().optional(), revision: RevisionSchema, password: PasswordSchema }),
   WebsiteResourceSchema.safeExtend({ revision: RevisionSchema, password: PasswordSchema }),
 ])
 export const ResourceTypeSchema = z.enum(['linux-host', 'postgresql', 'website-account'])

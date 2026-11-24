@@ -170,6 +170,8 @@ const TEXT = {
   remoteDbPort: ['数据库端口', 'Database port'],
   remoteDbName: ['数据库名', 'Database name'],
   remoteDbUsername: ['数据库用户名', 'Database username'],
+  remoteDbTls: ['使用 TLS', 'Use TLS'],
+  remoteDbTlsHint: ['关闭后连接不加密，仅用于可信内网。CA 证书仅在启用 TLS 时生效。', 'Without TLS, the connection is unencrypted. Use it only on a trusted private network. The CA certificate is used only when TLS is enabled.'],
   remoteDbCa: ['TLS CA 证书（可选 PEM）', 'TLS CA certificate (optional PEM)'],
   remoteWebOrigin: ['网站地址', 'Website address'],
   remoteWebOriginHint: ['填写站点根地址，不要带路径、查询参数或账号。公网地址必须使用 HTTPS；私网 IPv4 可用 HTTP，例如 http://192.168.77.10。HTTP 会明文传输密码和登录令牌，仅在可信内网使用。', 'Enter the site origin without a path, query or credentials. HTTP is accepted only for private IPv4 addresses, e.g. http://192.168.77.10. HTTP sends passwords and login tokens in plaintext; use it only on a trusted private network.'],

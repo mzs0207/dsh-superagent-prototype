@@ -213,15 +213,20 @@ export class ManagedStore {
 
   saveResource(environmentId: string, id: string | undefined, input: ResourceWrite): Promise<ManagedView> {
     return this.#execute(async (state, key) => {
-      const { revision, password, ...fields } = parseInput(ResourceWriteSchema, input)
+      const { revision, password, ...submitted } = parseInput(ResourceWriteSchema, input)
       assertRevision(state, revision)
       const { resources } = findEnvironment(state, environmentId)
+      const index = id === undefined ? -1 : resources.findIndex(item => item.id === id)
+      const previous = resources[index]
+      // Omitted on legacy writes: preserve the stored mode on edits, default new records to no TLS.
+      const fields = submitted.type === 'postgresql'
+        ? { ...submitted, tls: submitted.tls ?? (previous?.type === 'postgresql' && previous.tls) }
+        : submitted
       if (id === undefined) {
         if (!password) throw new RemoteManagementError(400, 'password_required', 'A password is required for a new resource.')
         const uid = randomUUID()
         resources.push({ ...fields, id: uid, secret: encrypt(key, uid, password) })
       } else {
-        const index = resources.findIndex(item => item.id === id), previous = resources[index]
         if (!previous) throw new RemoteManagementError(404, 'resource_not_found', 'Environment resource was not found.')
         if (previous.type !== fields.type) throw invalid()
         const changedTarget = fields.username !== previous.username || (fields.type === 'postgresql' && previous.type === 'postgresql'

@@ -57,11 +57,11 @@ async function apiJson(origin: string, path: string, options: RequestInit): Prom
 }
 
 async function postgres(resource: Extract<ManagedResource, { type: 'postgresql' }>, password: string, signal: AbortSignal) {
-  const { host, port, database, username, ca } = resource
+  const { host, port, database, username, tls, ca } = resource
   signal.throwIfAborted()
   const client = new pg.Client({ host, port, database, user: username, password, connectionTimeoutMillis: 5000,
     query_timeout: 5000, statement_timeout: 5000, options: '-c default_transaction_read_only=on',
-    ssl: { rejectUnauthorized: true, ...(ca ? { ca } : {}) } })
+    ssl: tls ? { rejectUnauthorized: true, ...(ca ? { ca } : {}) } : false })
   const stop = () => { void client.end().catch(() => undefined) }
   signal.addEventListener('abort', stop, { once: true })
   try {

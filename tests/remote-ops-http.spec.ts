@@ -210,6 +210,30 @@ it('stores typed resources and searchable notes without exposing stored password
   expect(JSON.stringify(found)).not.toMatch(/ciphertext|fixture password/)
 })
 
+it('defaults new databases to plaintext and preserves TLS on records created before the option existed', async () => {
+  const h = await host(), { environment } = await h.create()
+  const root = `environments/${environment}/resources`
+  const fields = { type: 'postgresql', name: 'Database', host: 'db.example.invalid', database: 'app', username: 'reader', ca: 'fixture CA' }
+  const created = await h.call('POST', root, { ...fields, revision: 2, password: secret })
+  expect(created).toMatchObject({ status: 200, body: { environments: [{ resources: [{ tls: false }] }] } })
+  const id = created.body.environments[0]!.resources![0]!.id
+  const path = join(h.dir, 'remote-ops', 'state.json')
+  const state = JSON.parse(await readFile(path, 'utf8'))
+  delete state.environments[0].resources[0].tls
+  const legacy = JSON.stringify(state)
+  await writeFile(path, legacy)
+  expect(await h.call('GET')).toMatchObject({ status: 200, body: { environments: [{ resources: [{ id, tls: true }] }] } })
+  expect(await readFile(path, 'utf8')).toBe(legacy)
+  const route = `${root}/${id}`
+  expect(await h.call('PUT', route, { ...fields, revision: 3 })).toMatchObject({
+    status: 200, body: { environments: [{ resources: [{ id, tls: true }] }] },
+  })
+  expect(await h.call('PUT', route, { ...fields, revision: 4, tls: false })).toMatchObject({
+    status: 200, body: { environments: [{ resources: [{ id, tls: false, ca: 'fixture CA', hasPassword: true }] }] },
+  })
+  expect((await h.remote.store.resourceCredentials(environment, id, 5, false)).password).toBe(secret)
+})
+
 it('authorizes official OMS login only after the Worker is enabled and never returns the test tokens', async () => {
   const h = await host(), { environment } = await h.create()
   const origin = 'https://oms.example.invalid', username = 'test@example.invalid'
