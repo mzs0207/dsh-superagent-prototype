@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ManagedStore } from '../src/remote-ops/managed-store.ts'
 import { RemoteManagementError, type HostWrite, type ManagedView } from '../src/remote-ops/managed-types.ts'
+import { SHARED_ENVIRONMENT } from '../src/remote-ops/catalog-types.ts'
 
 const faults = vi.hoisted(() => ({ failRename: false }))
 vi.mock('node:fs/promises', async importOriginal => {
@@ -18,6 +19,7 @@ vi.mock('node:fs/promises', async importOriginal => {
 const directories: string[] = []
 const PASSWORD = 'fixture-only secret 你好 \'$(not-a-command)'
 const FINGERPRINT = `SHA256:${'a'.repeat(43)}`
+const shared = { id: SHARED_ENVIRONMENT, name: '公用环境', aliases: [], production: false, shared: true, hosts: [] }
 const hostInput = (revision: number, overrides: Partial<HostWrite> = {}): HostWrite => ({
   revision, name: '诊断节点', host: 'app.example.invalid', username: 'diagnostic', password: PASSWORD,
   projects: [{ id: 'community', label: '社区', directory: '/srv/community' }], ...overrides,
@@ -60,7 +62,7 @@ describe('managed remote store CRUD and CAS', () => {
   it('initializes lazily, permits empty environments, and publishes no private material', async () => {
     const { store, directory } = await fixture()
     await expect(lstat(directory)).rejects.toMatchObject({ code: 'ENOENT' })
-    expect(await store.view()).toEqual({ revision: 0, environments: [] })
+    expect(await store.view()).toEqual({ revision: 0, environments: [shared] })
     const view = await store.createEnvironment({ revision: 0, name: ' 验收 ', aliases: ['亚太'], production: true })
     expect(view.revision).toBe(1)
     expect(view.environments[0]).toMatchObject({ name: '验收', aliases: ['亚太'], production: true, hosts: [] })
@@ -73,10 +75,10 @@ describe('managed remote store CRUD and CAS', () => {
     let view = await store.createEnvironment({ revision: 0, name: '开发' })
     const id = view.environments[0]!.id
     view = await store.updateEnvironment(id, { revision: 1, name: '生产', aliases: ['线上'], production: true })
-    expect(view).toEqual({ revision: 2, environments: [{ id, name: '生产', aliases: ['线上'], production: true, hosts: [] }] })
+    expect(view).toEqual({ revision: 2, environments: [{ id, name: '生产', aliases: ['线上'], production: true, hosts: [] }, shared] })
     view.environments[0]!.aliases.push('external mutation')
     expect((await store.view()).environments[0]!.aliases).toEqual(['线上'])
-    expect(await store.deleteEnvironment(id, 2)).toEqual({ revision: 3, environments: [] })
+    expect(await store.deleteEnvironment(id, 2)).toEqual({ revision: 3, environments: [shared] })
     await failure(store.deleteEnvironment(id, 3), 404, 'environment_not_found')
   })
 
@@ -192,7 +194,7 @@ describe('managed remote store CRUD and CAS', () => {
     expect(results[1]).toMatchObject({ status: 'rejected', reason: { status: 409, code: 'revision_conflict' } })
     const view = await store.view()
     expect(view.revision).toBe(1)
-    expect(view.environments).toHaveLength(1)
+    expect(view.environments.filter(environment => !environment.shared).map(environment => environment.name)).toEqual(['first'])
     const id = view.environments[0]!.id
     const created = await store.createHost(id, hostInput(view.revision))
     const hostId = created.environments[0]!.hosts[0]!.id

@@ -8,6 +8,7 @@ import { probeHostKey, runPasswordSsh, type PasswordConnection, type ProbeAddres
 import { checkResource, isWebsiteReadPath, openWebsite, type WebsiteConnection, type WebsiteReadResult } from './resource-checks.ts'
 import { RemoteManagementError, ProbeSchema, TrustSchema, ResourceActionSchema, ResourceLoginSchema, ResourceSearchSchema,
   ResourceSessionReadSchema, type ConnectionTest, type HostKeyProbe, type ManagedEnvironment, type ManagedHost, type ManagedView } from './managed-types.ts'
+import { ProjectRefresh, type SummaryRuntime } from './project-refresh.ts'
 
 interface PasswordTransport {
   probe(address: ProbeAddress, signal: AbortSignal, limits: ProcessLimits): Promise<string>
@@ -36,6 +37,7 @@ function selectEnvironment(view: ManagedView, selector: string): ManagedEnvironm
 /** Owns an encrypted host store, UI trust challenges, and the common bounded diagnostic connection lifecycle. */
 export class ManagedRemoteOps {
   readonly store: ManagedStore
+  readonly projects: ProjectRefresh
   private readonly runner = new RemoteOps({ inventoryFile: '', maxConcurrent: 2, ...LIMITS })
   private readonly challenges = new Map<string, Challenge>()
   private readonly opening = new Set<WebsiteOpening>()
@@ -44,8 +46,9 @@ export class ManagedRemoteOps {
   private readonly stopped = new AbortController()
   constructor(directory: string,
     private readonly ssh: PasswordTransport = { probe: probeHostKey, run: runPasswordSsh },
-    private readonly browserExecutable = '') {
+    private readonly browserExecutable = '', llm: () => SummaryRuntime | undefined = () => undefined) {
     this.store = new ManagedStore(directory)
+    this.projects = new ProjectRefresh(this.store, llm)
   }
   private signal(signal: AbortSignal): AbortSignal { return AbortSignal.any([signal, this.stopped.signal]) }
   private async target(environment: string, host: string, revision: number): Promise<ManagedHost> {
@@ -98,6 +101,7 @@ export class ManagedRemoteOps {
     const view = await this.store.view()
     return { configured: true, source: 'managed', readOnly: true, environments: view.environments.map(environment => ({
       id: environment.id, label: environment.name, aliases: environment.aliases, production: environment.production,
+      ...(environment.shared && { shared: true }),
       servers: environment.hosts.map(host => ({ id: host.id, label: host.name, trusted: !!host.hostKeyFingerprint,
         projects: host.projects.map(project => ({ id: project.id, ...(project.label ? { label: project.label } : {}) })) })),
     })) }
@@ -106,6 +110,17 @@ export class ManagedRemoteOps {
     const request = ResourceSearchSchema.parse(input), view = await this.store.view()
     const environment = selectEnvironment(view, request.environment)
     const keyword = request.keyword?.normalize('NFKC').toLowerCase()
+    const shared = view.environments.find(env => env.shared)
+    const catalog = (shared && shared !== environment ? [environment, shared] : [environment]).flatMap(env =>
+      (env.catalog ?? []).map(item => {
+        const fields = { id: item.id, name: item.name, type: item.type, notes: item.notes, environment: env.name }
+        switch (item.type) {
+          case 'project': return { ...fields, localPath: item.localPath, repository: item.repository, commit: item.commit }
+          case 'person': return { ...fields, position: item.position, responsibility: item.responsibility }
+          case 'team': return { ...fields, members: item.members.slice(0, 20), membersTruncated: item.members.length > 20 }
+          case 'project-relationship': return { ...fields, source: item.source, target: item.target, description: item.description }
+        }
+      }))
     const resources = [
       ...environment.hosts.map(host => ({ id: host.id, name: host.name, type: 'linux-host' as const, notes: host.notes ?? '',
         trusted: !!host.hostKeyFingerprint, projects: host.projects.map(project => project.id) })),
@@ -114,9 +129,20 @@ export class ManagedRemoteOps {
             host: resource.host, port: resource.port, database: resource.database }
         : { id: resource.id, name: resource.name, type: resource.type, notes: resource.notes, allowWorker: resource.allowWorker,
             origin: resource.origin, system: resource.system }),
+      ...catalog,
     ].filter(resource => (!request.resource || resource.id === request.resource) && (!request.type || resource.type === request.type)
       && (!keyword || `${resource.name}\n${resource.notes}`.normalize('NFKC').toLowerCase().includes(keyword)))
-    return { environment: environment.name, production: environment.production, resources: resources.slice(0, 30), truncated: resources.length > 30 }
+    let projectSummary
+    if (request.summary && request.resource && resources.some(item => item.type === 'project' && item.id === request.resource)) {
+      const owner = environment.catalog?.some(item => item.id === request.resource) ? environment : shared!
+      const summary = await this.store.projectSummary(owner.id, request.resource)
+      if (summary) {
+        const text = summary[request.summary]
+        projectSummary = { commit: summary.commit, markdown: text.slice(0, 12_000), truncated: text.length > 12_000 }
+      }
+    }
+    return { environment: environment.name, production: environment.production, resources: resources.slice(0, 30),
+      truncated: resources.length > 30, ...(projectSummary && { projectSummary }) }
   }
   async check(input: unknown, signal: AbortSignal, worker: boolean, expectedRevision?: number): Promise<ConnectionTest> {
     const request = ResourceActionSchema.parse(input), view = await this.store.view()
@@ -236,6 +262,7 @@ export class ManagedRemoteOps {
   async stop(): Promise<void> {
     this.stopped.abort(); this.challenges.clear()
     const closing = [...this.logins].map(login => this.closeLogin(login))
+    await this.projects.stop()
     await Promise.all([this.runner.stop(), this.store.close(), ...closing, ...this.closingLogins])
   }
 }

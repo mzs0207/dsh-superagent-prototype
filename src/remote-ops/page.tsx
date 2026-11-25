@@ -7,6 +7,9 @@ import { Field, Fields } from '../client/settings-kit.tsx'
 import type { T } from '../client/text.ts'
 import { Hint, Section } from '../client/widgets.tsx'
 import { isWebsiteAddress, REMOTE_API, WEBSITE_SYSTEMS, type RemoteApi, type RemoteRequest, type WebsiteSystem } from './api.ts'
+import type { CatalogResource, CatalogWrite } from './catalog-types.ts'
+import type { ProjectSummaryView } from './project-refresh.ts'
+import type { ImportPreview } from './portable.ts'
 
 /** HTTP status only: never read or relay untrusted error bodies from a credential-submitting request. */
 class RemoteRequestError extends Error { constructor(readonly status: number) { super('Environment management request failed') } }
@@ -380,39 +383,264 @@ function ResourceCard({ resource, environment, revision, actions, onEdit }: {
   </article>
 }
 
-function EnvironmentPanel({ environment, revision, actions }: { environment: ManagedEnvironment; revision: number; actions: Actions }) {
+const catalogTypes: CatalogResource['type'][] = ['project', 'project-relationship', 'person', 'team']
+type ProjectChoice = { id: string; label: string }
+
+function CatalogEditor({ type, resource, environment, revision, projects, actions, onCancel }: {
+  type: CatalogResource['type']; resource?: CatalogResource; environment: string; revision: number
+  projects: ProjectChoice[]; actions: Actions; onCancel: () => void
+}) {
   const t = useContext(Language)
-  const [editor, setEditor] = useState<'environment' | 'new' | string>()
+  const project = resource?.type === 'project' ? resource : undefined
+  const relation = resource?.type === 'project-relationship' ? resource : undefined
+  const person = resource?.type === 'person' ? resource : undefined
+  const [semantic, setSemantic] = useState(!!project?.model)
+  const [source, setSource] = useState(relation?.source ?? '')
+  const [target, setTarget] = useState(relation?.target ?? '')
+  const [members, setMembers] = useState(resource?.type === 'team' ? resource.members : [{ name: '', email: '' }])
+  const title = t(resource ? 'remoteEditResource' : `remoteAddCatalog.${type}`)
+  const submit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    if (actions.disabled) return
+    const data = new FormData(event.currentTarget)
+    const field = (name: string) => String(data.get(name) ?? '')
+    const base = { revision, name: field('name'), notes: field('notes') }
+    let body: CatalogWrite
+    switch (type) {
+      case 'project': body = { ...base, type, localPath: field('localPath'), repository: field('repository'),
+        ...(semantic && { model: { provider: field('provider'), model: field('model') } }) }; break
+      case 'project-relationship': body = { ...base, type, source, target, description: field('description') }; break
+      case 'person': body = { ...base, type, position: field('position'), responsibility: field('responsibility') }; break
+      case 'team': body = { ...base, type, members }; break
+    }
+    void actions.commit(() => resource ? call('PUT remote/environments/:environment/catalog/:resource', { environment, resource: resource.id, body })
+      : call('POST remote/environments/:environment/catalog', { environment, body }))
+  }
+  return <form className="dt-form dt-card" aria-label={title} onSubmit={submit}>
+    <Fields disabled={actions.disabled}>
+      <h3 className="dt-block-title">{title}</h3>
+      <Field label={t(type === 'person' ? 'remoteMemberName' : 'remoteResourceName')}>
+        <Input name="name" required maxLength={100} defaultValue={resource?.name} />
+      </Field>
+      {type === 'project' && <>
+        <Field label={t('remoteLocalPath')}><Input name="localPath" required maxLength={4096} defaultValue={project?.localPath} /></Field>
+        <Field label={t('remoteRepositoryUrl')}><Input name="repository" required maxLength={2048} defaultValue={project?.repository} /></Field>
+        <label className="dt-remote-check"><input type="checkbox" checked={semantic}
+          onChange={event => setSemantic(event.target.checked)} />{t('remoteSemantic')}</label>
+        {semantic && <>
+          <Hint>{t('remoteSemanticHint')}</Hint>
+          <Field label={t('remoteModelProvider')}><Input name="provider" required maxLength={120} defaultValue={project?.model?.provider} /></Field>
+          <Field label={t('remoteModelId')}><Input name="model" required maxLength={160} defaultValue={project?.model?.model} /></Field>
+        </>}
+      </>}
+      {type === 'project-relationship' && <>
+        {projects.length < 2 && <Hint>{t('remoteRelationshipNeedsProjects')}</Hint>}
+        <Field label={t('remoteRelationshipSource')}><select className="dt-input" required value={source} onChange={event => setSource(event.target.value)}>
+          <option value="">—</option>
+          {projects.filter(item => item.id !== target).map(item => <option key={item.id} value={item.id}>{item.label}</option>)}
+        </select></Field>
+        <Field label={t('remoteRelationshipTarget')}><select className="dt-input" required value={target} onChange={event => setTarget(event.target.value)}>
+          <option value="">—</option>
+          {projects.filter(item => item.id !== source).map(item => <option key={item.id} value={item.id}>{item.label}</option>)}
+        </select></Field>
+        <Field label={t('remoteRelationshipDescription')}><textarea className="dt-textarea" name="description" required maxLength={2000} defaultValue={relation?.description} /></Field>
+      </>}
+      {type === 'person' && <>
+        <Field label={t('remotePosition')}><Input name="position" required maxLength={200} defaultValue={person?.position} /></Field>
+        <Field label={t('remoteResponsibility')}><textarea className="dt-textarea" name="responsibility" required maxLength={3000} defaultValue={person?.responsibility} /></Field>
+      </>}
+      {type === 'team' && <>
+        {members.map((member, index) => <div key={index} className="dt-card dt-form">
+          <Field label={t('remoteMemberName')}><Input required maxLength={100} value={member.name}
+            onChange={event => { const name = event.target.value; setMembers(list => list.map((item, i) => i === index ? { ...item, name } : item)) }} /></Field>
+          <Field label={t('remoteMemberEmail')}><Input type="email" required maxLength={254} value={member.email}
+            onChange={event => { const email = event.target.value; setMembers(list => list.map((item, i) => i === index ? { ...item, email } : item)) }} /></Field>
+          <Button size="sm" disabled={members.length === 1} onClick={() => setMembers(list => list.filter((_, i) => i !== index))}>{t('remove')}</Button>
+        </div>)}
+        <Button size="sm" disabled={members.length >= 100} onClick={() => setMembers(list => [...list, { name: '', email: '' }])}>{t('remoteAddMember')}</Button>
+      </>}
+      <Field label={t('remoteNotes')} note={t('remoteNotesHint')}><textarea className="dt-textarea" name="notes" rows={3} maxLength={2000} defaultValue={resource?.notes} /></Field>
+      <div className="dt-actions"><Button type="submit" variant="primary">{t('save')}</Button><Button onClick={onCancel}>{t('cancel')}</Button></div>
+    </Fields>
+  </form>
+}
+
+function downloadFile(name: string, mime: string, text: string): void {
+  const url = URL.createObjectURL(new Blob([text], { type: mime }))
+  const link = document.createElement('a')
+  link.href = url
+  link.download = name
+  link.click()
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+}
+
+function RepositorySummary({ environment, resource, disabled }: { environment: string; resource: string; disabled: boolean }) {
+  const t = useContext(Language)
+  const [state, setState] = useState<ProjectSummaryView>()
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string>()
+  useEffect(() => {
+    let mounted = true, poll: ReturnType<typeof setTimeout> | undefined
+    const load = async () => {
+      try {
+        const status = await call('GET remote/environments/:environment/projects/:resource/summary', { environment, resource })
+        if (!mounted) return
+        setState(status)
+        if (status.status === 'pending' || status.status === 'scanning') poll = setTimeout(() => { void load() }, 1500)
+      } catch (failure) { if (mounted) setError(failureText(t, failure)) }
+    }
+    void load()
+    return () => { mounted = false; clearTimeout(poll) }
+  }, [environment, resource, t])
+  const refresh = async () => {
+    setBusy(true); setError(undefined)
+    try { setState(await call('POST remote/environments/:environment/projects/:resource/summary', { environment, resource })) }
+    catch (failure) { setError(failureText(t, failure)) }
+    finally { setBusy(false) }
+  }
+  return <Section title={t('remoteSummary')} action={<Button size="sm" disabled={disabled || busy || !state || state.status === 'inactive'}
+    onClick={() => { void refresh() }}>{t('remoteRefreshSummary')}</Button>}>
+    {error && <p className="dt-error" role="alert">{error}</p>}
+    <p className="dt-hint" role="status">{busy ? t('remoteSummary.scanning') : state ? t(`remoteSummary.${state.status}`) : t('loading')}</p>
+    {state?.summary && <><p className="dt-mono">{state.summary.commit}</p>
+      {(['overview', 'detail'] as const).map(key => <details key={key}>
+        <summary>{t(key === 'overview' ? 'remoteOverview' : 'remoteDetail')}</summary>
+        <pre className="dt-remote-markdown">{state.summary![key]}</pre>
+        <Button size="sm" onClick={() => downloadFile(`${key}.md`, 'text/markdown;charset=utf-8', state.summary![key])}>{t('remoteDownloadMarkdown')}</Button>
+      </details>)}
+    </>}
+  </Section>
+}
+
+function CatalogCard({ item, environment, revision, projects, actions, onEdit }: {
+  item: CatalogResource; environment: string; revision: number; projects: ProjectChoice[]; actions: Actions; onEdit: () => void
+}) {
+  const t = useContext(Language)
+  const [summary, setSummary] = useState(false)
+  return <article className="dt-card dt-remote-host" aria-label={item.name}>
+    <div className="dt-toolbar"><h3 className="dt-block-title">{item.name} <Tag>{t(`remoteCatalog.${item.type}`)}</Tag></h3>
+      <div className="dt-actions">
+        {item.type === 'project' && <Button size="sm" aria-expanded={summary} onClick={() => setSummary(value => !value)}>{t('remoteSummary')}</Button>}
+        <Button size="sm" disabled={actions.disabled} onClick={onEdit}>{t('remoteEditResource')}</Button>
+        <DeleteInline name={item.name} disabled={actions.disabled} remove={() => actions.commit(() => call(
+          'DELETE remote/environments/:environment/catalog/:resource', { environment, resource: item.id, body: { revision } }))} />
+      </div>
+    </div>
+    {item.type === 'project' && <><div className="dt-mono">{item.localPath}</div><p className="dt-mono">{item.repository}</p>
+      {summary && <RepositorySummary environment={environment} resource={item.id} disabled={actions.disabled} />}</>}
+    {item.type === 'project-relationship' && <><div>{projects.find(project => project.id === item.source)?.label ?? item.source} → {projects.find(project => project.id === item.target)?.label ?? item.target}</div><p>{item.description}</p></>}
+    {item.type === 'person' && <><div>{item.position}</div><p>{item.responsibility}</p></>}
+    {item.type === 'team' && <ul className="dt-plain-list">{item.members.map(member => <li key={member.email}>{member.name} · {member.email}</li>)}</ul>}
+    {item.notes && <Hint>{item.notes}</Hint>}
+  </article>
+}
+
+function TransferConfiguration({ actions }: { actions: Actions }) {
+  const t = useContext(Language)
+  const [bundle, setBundle] = useState<unknown>()
+  const [preview, setPreview] = useState<ImportPreview>()
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string>()
+  const inspect = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    const file = new FormData(event.currentTarget).get('config')
+    if (!(file instanceof File) || !file.size || file.size > 16 * 1024 * 1024) { setError(t('remoteInvalid')); return }
+    setBusy(true); setError(undefined); setPreview(undefined); setBundle(undefined)
+    try {
+      const content: unknown = JSON.parse(await file.text())
+      setPreview(await call('POST remote/import/preview', { body: { bundle: content } }))
+      setBundle(content)
+    } catch (failure) { setError(failure instanceof SyntaxError ? t('remoteInvalid') : failureText(t, failure)) }
+    finally { setBusy(false) }
+  }
+  const apply = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    if (!preview || actions.disabled) return
+    const form = event.currentTarget
+    const passwords = Object.fromEntries([...new FormData(form)].map(([id, value]) => [id, String(value)]))
+    form.reset()
+    if (await actions.commit(() => call('POST remote/import', { body: { bundle, revision: preview.revision, passwords } }))) {
+      setPreview(undefined); setBundle(undefined)
+    }
+  }
+  const exportConfiguration = async () => {
+    setBusy(true); setError(undefined)
+    try { downloadFile('environment-resources.json', 'application/json', JSON.stringify(await call('GET remote/export'))) }
+    catch (failure) { setError(failureText(t, failure)) }
+    finally { setBusy(false) }
+  }
+  return <div className="dt-card dt-form">
+    <Hint>{t('remoteImportHint')}</Hint>
+    {error && <p className="dt-error" role="alert">{error}</p>}
+    <form aria-label={t('remoteImport')} onSubmit={inspect}>
+      <Fields disabled={actions.disabled || busy}>
+        <Field label={t('remoteImportFile')}><Input name="config" type="file" accept=".json,application/json" required
+          onChange={() => { setPreview(undefined); setBundle(undefined); setError(undefined) }} /></Field>
+        <div className="dt-actions"><Button type="submit">{t('remoteImportPreview')}</Button>
+          <Button onClick={() => { void exportConfiguration() }}>{t('remoteExport')}</Button></div>
+      </Fields>
+    </form>
+    {preview && <form className="dt-form" onSubmit={apply} autoComplete="off">
+      <Fields disabled={actions.disabled || busy}>
+        <p role="status">{t('remoteImportCounts', { added: preview.added, unchanged: preview.unchanged })}</p>
+        {preview.passwords.map(item => <Field key={item.id} label={`${t('remoteResourcePassword')} — ${item.environment} / ${item.name}`}>
+          <Input name={item.id} type="password" required maxLength={4096} autoComplete="new-password" />
+        </Field>)}
+        <div className="dt-actions"><Button type="submit" variant="primary" disabled={!preview.added}>{t('remoteImportConfirm')}</Button>
+          <Button onClick={() => { setPreview(undefined); setBundle(undefined) }}>{t('cancel')}</Button></div>
+      </Fields>
+    </form>}
+  </div>
+}
+
+function EnvironmentPanel({ environment, revision, environments, actions }: {
+  environment: ManagedEnvironment; revision: number; environments: ManagedEnvironment[]; actions: Actions
+}) {
+  const t = useContext(Language)
+  const [editor, setEditor] = useState<string>()
   const editingHost = environment.hosts.find(host => host.id === editor)
   const resources = environment.resources ?? []
   const editingResource = resources.find(resource => resource.id === editor)
   const resourceType = editingResource?.type ?? (editor === 'postgresql' || editor === 'website-account' ? editor : undefined)
+  const catalog = environment.catalog ?? []
+  const editingCatalog = catalog.find(item => item.id === editor)
+  const catalogType = editingCatalog?.type ?? catalogTypes.find(type => type === editor)
+  const projects = environments.flatMap(env => (env.catalog ?? []).filter(item => item.type === 'project')
+    .map(item => ({ id: item.id, label: `${env.name} / ${item.name}` })))
   return <div className="dt-remote-main">
     {editor === 'environment' ? <EnvironmentEditor environment={environment} revision={revision} actions={actions}
       onCancel={() => setEditor(undefined)} /> : <Section title={environment.name}
-      badge={environment.production ? <Tag tone="warning">{t('remoteProduction')}</Tag> : undefined} action={<div className="dt-actions">
+      badge={environment.shared ? <Tag>{t('remoteShared')}</Tag> : environment.production ? <Tag tone="warning">{t('remoteProduction')}</Tag> : undefined}
+      action={!environment.shared && <div className="dt-actions">
         <Button size="sm" disabled={actions.disabled} onClick={() => setEditor('environment')}>{t('remoteEditEnvironment')}</Button>
         <DeleteInline environment name={environment.name} disabled={actions.disabled} remove={() => actions.commit(() => call(
           'DELETE remote/environments/:environment', { environment: environment.id, body: { revision } }))} />
       </div>}>
       {!!environment.aliases.length && <Hint>{t('remoteAliases')}: {environment.aliases.join(' · ')}</Hint>}
+      {environment.shared && <Hint>{t('remoteSharedHint')}</Hint>}
     </Section>}
-    {editor !== 'environment' && <Section title={t('remoteResources')} count={environment.hosts.length + resources.length}
+    {editor !== 'environment' && <Section title={t('remoteResources')} count={environment.hosts.length + resources.length + catalog.length}
       action={<div className="dt-actions">
         <Button size="sm" icon={<Icon name="plus" />} disabled={actions.disabled || editor !== undefined}
           onClick={() => setEditor('new')}>{t('remoteAddHost')}</Button>
         <Button size="sm" disabled={actions.disabled || editor !== undefined} onClick={() => setEditor('postgresql')}>{t('remoteAddPostgres')}</Button>
         <Button size="sm" disabled={actions.disabled || editor !== undefined} onClick={() => setEditor('website-account')}>{t('remoteAddWebsite')}</Button>
+        {catalogTypes.map(type => <Button key={type} size="sm" disabled={actions.disabled || editor !== undefined}
+          onClick={() => setEditor(type)}>{t(`remoteAddCatalog.${type}`)}</Button>)}
       </div>}>
       {editor === 'new' || editingHost ? <HostEditor key={editor} host={editingHost} environment={environment.id} revision={revision}
         actions={actions} onCancel={() => setEditor(undefined)} /> : resourceType
         ? <ResourceEditor key={editor} type={resourceType} resource={editingResource} environment={environment.id} revision={revision}
-          actions={actions} onCancel={() => setEditor(undefined)} /> : <>
+          actions={actions} onCancel={() => setEditor(undefined)} /> : catalogType ? <CatalogEditor key={editor} type={catalogType}
+          resource={editingCatalog} environment={environment.id} revision={revision} actions={actions} projects={projects}
+          onCancel={() => setEditor(undefined)} /> : <>
           {environment.hosts.map(host => <HostCard key={host.id} host={host} environment={environment.id} revision={revision}
             actions={actions} onEdit={() => setEditor(host.id)} />)}
           {resources.map(resource => <ResourceCard key={resource.id} resource={resource} environment={environment} revision={revision}
             actions={actions} onEdit={() => setEditor(resource.id)} />)}
-          {!environment.hosts.length && !resources.length && <Hint>{t('remoteNoResources')}</Hint>}
+          {catalog.map(item => <CatalogCard item={item} key={item.id} environment={environment.id} revision={revision}
+            projects={projects} actions={actions} onEdit={() => setEditor(item.id)} />)}
+          {!environment.hosts.length && !resources.length && !catalog.length && <Hint>{t('remoteNoResources')}</Hint>}
         </>}
     </Section>}
   </div>
@@ -427,6 +655,7 @@ function Inventory() {
   const [view, setView] = useState<ManagedView>()
   const [selected, setSelected] = useState<string>()
   const [creating, setCreating] = useState(false)
+  const [transferring, setTransferring] = useState(false)
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
   const [conflict, setConflict] = useState(false)
@@ -465,25 +694,29 @@ function Inventory() {
   }
   const environment = view?.environments.find(item => item.id === selected)
   const actions: Actions = { commit, disabled: busy || loading || conflict, conflict: () => setConflict(true) }
-  return <Section title={t('tab.remote')} action={<Button variant="outline" size="sm" icon={<Icon name="refresh" />}
-    disabled={busy || loading} onClick={() => { void reload() }}>{t('remoteRefresh')}</Button>}>
+  return <Section title={t('tab.remote')} action={<div className="dt-actions">
+    <Button size="sm" disabled={!view || busy || loading} aria-expanded={transferring} onClick={() => setTransferring(value => !value)}>
+      {t('remoteImport')} / {t('remoteExport')}</Button>
+    <Button variant="outline" size="sm" icon={<Icon name="refresh" />} disabled={busy || loading}
+      onClick={() => { void reload() }}>{t('remoteRefresh')}</Button></div>}>
     <Hint>{t('remoteIntro')}</Hint>
     {error && <p className="dt-error" role="alert">{error}</p>}
     {conflict && <p className="dt-banner" role="status">{t('remoteConflict')}</p>}
     {loading && <p className="dt-hint" role="status">{t('loading')}</p>}
     {busy && <p className="dt-hint" role="status">{t('remotePending')}</p>}
+    {view && transferring && <TransferConfiguration key={epoch} actions={actions} />}
     {view && <div className="dt-remote-layout">
       <nav className="dt-remote-nav" aria-label={t('remoteEnvironments')}>
-        {view.environments.map(item => <button type="button" key={item.id} aria-label={item.name} disabled={busy || loading} className="dt-nav-item" aria-current={!creating
+        {[...view.environments].sort((a, b) => Number(!!b.shared) - Number(!!a.shared)).map(item => <button type="button" key={item.id} aria-label={item.name} disabled={busy || loading} className="dt-nav-item" aria-current={!creating
           && item.id === selected ? 'true' : undefined} onClick={() => { setCreating(false); setSelected(item.id); setEpoch(value => value + 1) }}>
-          <span>{item.name}</span><span className="dt-count">{item.hosts.length + (item.resources?.length ?? 0)}</span>
+          <span>{item.name}</span><span className="dt-count">{item.hosts.length + (item.resources?.length ?? 0) + (item.catalog?.length ?? 0)}</span>
         </button>)}
         <Button size="sm" icon={<Icon name="plus" />} disabled={actions.disabled} onClick={() => setCreating(true)}>
           {t('remoteAddEnvironment')}</Button>
       </nav>
       {creating ? <EnvironmentEditor key={`new:${view.revision}`} revision={view.revision} actions={actions} onCancel={() => setCreating(false)} />
         : environment ? <EnvironmentPanel key={`${environment.id}:${view.revision}:${epoch}`} environment={environment}
-          revision={view.revision} actions={actions} /> : <Hint>{t('remoteNoEnvironments')}</Hint>}
+          revision={view.revision} environments={view.environments} actions={actions} /> : <Hint>{t('remoteNoEnvironments')}</Hint>}
     </div>}
   </Section>
 }

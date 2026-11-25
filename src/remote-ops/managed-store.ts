@@ -9,6 +9,10 @@ import {
   RevisionSchema, WebsiteResourceSchema, type EnvironmentWrite, type HostCredentials, type HostWrite, type ManagedHost,
   type ManagedResource, type ManagedView, type ResourceWrite,
 } from './managed-types.ts'
+import { CatalogWriteSchema, SHARED_ENVIRONMENT, StoredCatalogSchema, type CatalogResource, type CatalogWrite,
+  type StoredCatalog, type StoredProject } from './catalog-types.ts'
+import { repositoryMarkdown, RepositorySnapshotSchema, type RepositorySnapshot } from './repository.ts'
+import { ImportPasswordsSchema, planImport, PortableBundleSchema, type PortableBundle, type PortableEnvironment } from './portable.ts'
 
 const MAX_STATE_BYTES = 16 * 1024 * 1024
 const PERMISSION_BITS = 0o7777
@@ -34,9 +38,10 @@ const StoredResourceSchema = z.union([
 const StoredEnvironmentSchema = EnvironmentWriteSchema.omit({ revision: true }).extend({
   id: z.string().uuid(), hosts: z.array(StoredHostSchema).max(1000),
   resources: z.array(StoredResourceSchema).max(1000).default([]),
+  catalog: z.array(StoredCatalogSchema).max(1000).default([]),
 }).strict()
 const StateSchema = z.object({
-  version: z.union([z.literal(1), z.literal(2)]), revision: RevisionSchema, environments: z.array(StoredEnvironmentSchema).max(1000),
+  version: z.union([z.literal(1), z.literal(2), z.literal(3)]), revision: RevisionSchema, environments: z.array(StoredEnvironmentSchema).max(1001),
 }).strict()
 type State = z.infer<typeof StateSchema>
 type StoredHost = z.infer<typeof StoredHostSchema>
@@ -65,10 +70,13 @@ function findHost(state: State, environmentId: string, hostId: string): StoredHo
   if (!host) throw new RemoteManagementError(404, 'host_not_found', 'Remote host was not found.')
   return host
 }
-function assertCollections(state: State): void {
+function assertCollections({ environments }: { environments: PortableEnvironment[] }): void {
   const environmentNames = new Set<string>()
   const resourceIds = new Set<string>()
-  for (const environment of state.environments) {
+  const projectIds = new Set<string>()
+  const relations: Extract<StoredCatalog, { type: 'project-relationship' }>[] = []
+  for (const environment of environments) {
+    if (environment.id === SHARED_ENVIRONMENT && (environment.production || environment.aliases.length)) throw invalid()
     // IDs share the selection namespace with names/aliases in the diagnostic inventory.
     for (const name of [environment.id, environment.name, ...environment.aliases]) {
       const normalized = normalizeName(name)
@@ -76,9 +84,11 @@ function assertCollections(state: State): void {
         'Environment names and aliases must be unique.')
       environmentNames.add(normalized)
     }
-    for (const resource of environment.resources) {
+    for (const resource of [...environment.resources, ...environment.catalog]) {
       if (resourceIds.has(resource.id)) throw invalid()
       resourceIds.add(resource.id)
+      if (resource.type === 'project') projectIds.add(resource.id)
+      else if (resource.type === 'project-relationship') relations.push(resource)
     }
     for (const host of environment.hosts) {
       const hostId = normalizeName(host.id)
@@ -92,6 +102,11 @@ function assertCollections(state: State): void {
       }
     }
   }
+  for (const relation of relations) {
+    if (relation.source === relation.target || !projectIds.has(relation.source) || !projectIds.has(relation.target)) {
+      throw new RemoteManagementError(400, 'project_referenced', 'Relationships must link two different existing projects. Remove a project’s relationships before deleting it.')
+    }
+  }
 }
 function hostView(host: StoredHost): ManagedHost {
   return { id: host.id, type: 'linux-host', notes: host.notes, name: host.name, host: host.host, port: host.port, username: host.username,
@@ -100,11 +115,54 @@ function hostView(host: StoredHost): ManagedHost {
 function resourceView({ secret: _, ...resource }: StoredResource): ManagedResource {
   return { ...resource, hasPassword: true }
 }
+function catalogView(item: StoredCatalog): CatalogResource {
+  if (item.type !== 'project') return item
+  const { snapshot, refreshRequired: _, ...fields } = item
+  return { ...fields, ...(snapshot && { commit: snapshot.commit }) }
+}
+
+function ensureShared(state: State): void {
+  if (state.environments.some(env => env.id === SHARED_ENVIRONMENT)) return
+  const taken = new Set(state.environments.flatMap(env => [env.name, ...env.aliases]).map(normalizeName))
+  let name = '公用环境'
+  for (let number = 1; taken.has(normalizeName(name)); number++) name = `公用环境（内置 ${number}）`
+  state.environments.push({ id: SHARED_ENVIRONMENT, name, aliases: [], production: false, hosts: [], resources: [], catalog: [] })
+}
+
+function portableView(state: State): PortableBundle {
+  return { format: 'dsh-environment-resources', version: 1, environments: state.environments.map(({ hosts, resources, catalog, ...environment }) => ({
+    ...environment,
+    hosts: hosts.map(({ secret: _, auth: _auth, hostKeyFingerprint: _trust, ...host }) => host),
+    resources: resources.map(({ secret: _, allowWorker: _worker, ...resource }) => {
+      if (resource.type === 'postgresql') return resource
+      const { communityTermsAccepted: _terms, ...fields } = resource
+      return fields
+    }),
+    catalog: catalog.map(item => {
+      if (item.type !== 'project') return item
+      const { model: _model, scanEnabled: _scan, refreshRequired: _refresh, ...fields } = item
+      return fields
+    }),
+  })) }
+}
+
+function sameProject(before: StoredProject, after: Pick<StoredProject, 'localPath' | 'repository' | 'model'>): boolean {
+  return before.localPath === after.localPath && before.repository === after.repository
+    && before.model?.provider === after.model?.provider && before.model?.model === after.model?.model
+}
+
+function findProject(state: State, environment: string, id: string): StoredProject {
+  const project = findEnvironment(state, environment).catalog.find(item => item.id === id)
+  if (project?.type !== 'project') throw new RemoteManagementError(404, 'project_not_found', 'Repository project was not found.')
+  return project
+}
 function viewOf(state: State): ManagedView {
   return { revision: state.revision, environments: state.environments.map(environment => ({
     id: environment.id, name: environment.name, aliases: [...environment.aliases], production: environment.production,
     hosts: environment.hosts.map(hostView),
+    ...(environment.id === SHARED_ENVIRONMENT ? { shared: true as const } : {}),
     ...(environment.resources.length ? { resources: environment.resources.map(resourceView) } : {}),
+    ...(environment.catalog.length ? { catalog: environment.catalog.map(catalogView) } : {}),
   })) }
 }
 function encrypt(key: Buffer, hostId: string, password: string): Secret {
@@ -149,7 +207,8 @@ export class ManagedStore {
       const parsed = parseInput(EnvironmentWriteSchema, input)
       assertRevision(state, parsed.revision)
       const { revision: _, ...fields } = parsed
-      state.environments.push({ ...fields, id: randomUUID(), hosts: [], resources: [] })
+      state.environments.splice(state.environments.findIndex(env => env.id === SHARED_ENVIRONMENT), 0,
+        { ...fields, id: randomUUID(), hosts: [], resources: [], catalog: [] })
       return this.#commit(state)
     })
   }
@@ -158,6 +217,7 @@ export class ManagedStore {
     return this.#execute(async state => {
       const parsed = parseInput(EnvironmentWriteSchema, input)
       assertRevision(state, parsed.revision)
+      if (id === SHARED_ENVIRONMENT) throw new RemoteManagementError(400, 'shared_environment', 'The built-in shared environment cannot be renamed or changed.')
       const environment = findEnvironment(state, id)
       const { revision: _, ...fields } = parsed
       Object.assign(environment, fields)
@@ -168,6 +228,7 @@ export class ManagedStore {
   deleteEnvironment(id: string, revision: number): Promise<ManagedView> {
     return this.#execute(async state => {
       assertRevision(state, parseInput(RevisionSchema, revision))
+      if (id === SHARED_ENVIRONMENT) throw new RemoteManagementError(400, 'shared_environment', 'The built-in shared environment cannot be deleted.')
       const environment = findEnvironment(state, id)
       state.environments.splice(state.environments.indexOf(environment), 1)
       return this.#commit(state)
@@ -251,6 +312,111 @@ export class ManagedStore {
     })
   }
 
+  saveCatalog(environmentId: string, id: string | undefined, input: CatalogWrite): Promise<ManagedView> {
+    return this.#execute(async state => {
+      const { revision, ...fields } = parseInput(CatalogWriteSchema, input)
+      assertRevision(state, revision)
+      const { catalog } = findEnvironment(state, environmentId)
+      const index = id === undefined ? -1 : catalog.findIndex(record => record.id === id)
+      const prior = catalog[index]
+      if (id !== undefined && !prior) throw new RemoteManagementError(404, 'resource_not_found', 'Environment resource was not found.')
+      if (prior && prior.type !== fields.type) throw invalid()
+      const recordId = id ?? randomUUID()
+      let record: StoredCatalog
+      if (fields.type === 'project') {
+        const previous = prior?.type === 'project' ? prior : undefined
+        const sameRepository = previous && previous.localPath === fields.localPath && previous.repository === fields.repository
+        record = { ...fields, id: recordId, scanEnabled: true, snapshot: sameRepository ? previous.snapshot : undefined,
+          refreshRequired: !!previous && (previous.refreshRequired || !sameProject(previous, fields)) }
+      } else record = { ...fields, id: recordId }
+      if (index === -1) catalog.push(record); else catalog[index] = record
+      return this.#commit(state)
+    })
+  }
+
+  deleteCatalog(environmentId: string, id: string, revision: number): Promise<ManagedView> {
+    return this.#execute(async state => {
+      assertRevision(state, revision)
+      const { catalog } = findEnvironment(state, environmentId)
+      const index = catalog.findIndex(record => record.id === id)
+      if (index === -1) throw new RemoteManagementError(404, 'resource_not_found', 'Environment resource was not found.')
+      catalog.splice(index, 1)
+      return this.#commit(state)
+    })
+  }
+
+  scanTargets() {
+    return this.#execute(async state => state.environments.flatMap(env => env.catalog.flatMap(record =>
+      record.type === 'project' && record.scanEnabled ? [{ environment: env.id, project: record }] : [])))
+  }
+
+  projectScanTarget(environment: string, id: string) {
+    return this.#execute(async state => findProject(state, environment, id))
+  }
+
+  projectSummary(environment: string, id: string) {
+    return this.#execute(async state => {
+      const { snapshot } = findProject(state, environment, id)
+      return snapshot ? { commit: snapshot.commit, ...repositoryMarkdown(snapshot) } : null
+    })
+  }
+
+  saveProjectSummary(environment: string, pending: StoredProject, snapshot: RepositorySnapshot): Promise<void> {
+    return this.#execute(async state => {
+      const project = findProject(state, environment, pending.id)
+      if (!project.scanEnabled || !sameProject(project, pending) || project.refreshRequired !== pending.refreshRequired
+        || project.snapshot?.commit !== pending.snapshot?.commit) return
+      if (!project.refreshRequired && project.snapshot?.commit === snapshot.commit) return
+      project.snapshot = RepositorySnapshotSchema.parse(snapshot)
+      project.refreshRequired = false
+      // A Git refresh is not a configuration edit and must not expire website leases or dirty forms.
+      await this.#writeState(state)
+    })
+  }
+
+  exportCatalog(): Promise<PortableBundle> {
+    return this.#execute(async state => portableView(state))
+  }
+
+  previewImport(input: unknown) {
+    return this.#execute(async state => {
+      const plan = planImport(portableView(state), parseInput(PortableBundleSchema, input), state.revision)
+      assertCollections(plan.bundle)
+      return plan.preview
+    })
+  }
+
+  importCatalog(input: unknown, revision: number, passwords: unknown): Promise<ManagedView> {
+    return this.#execute(async (state, key) => {
+      assertRevision(state, parseInput(RevisionSchema, revision))
+      const plan = planImport(portableView(state), parseInput(PortableBundleSchema, input), state.revision)
+      assertCollections(plan.bundle)
+      const secrets = parseInput(ImportPasswordsSchema, passwords)
+      if (plan.preview.passwords.some(item => !secrets[item.id])) {
+        throw new RemoteManagementError(400, 'password_required', 'Enter a password for every newly imported connection.')
+      }
+      if (Object.keys(secrets).length !== plan.preview.passwords.length) throw invalid()
+      if (!plan.preview.added) return viewOf(state)
+      const environments = new Map(state.environments.map(environment => [environment.id, environment]))
+      state.environments = plan.bundle.environments.map(({ hosts, resources, catalog, ...env }) => {
+        const existing = environments.get(env.id)
+        const oldHosts = new Map(existing?.hosts.map(item => [item.id, item]))
+        const oldResources = new Map(existing?.resources.map(item => [item.id, item]))
+        const oldCatalog = new Map(existing?.catalog.map(item => [item.id, item]))
+        return {
+          ...env,
+          hosts: hosts.map(host => oldHosts.get(host.id) ?? { ...host, auth: 'password', hostKeyFingerprint: null,
+            secret: encrypt(key, host.id, secrets[host.id]!) }),
+          resources: resources.map(resource => oldResources.get(resource.id) ?? { ...resource, allowWorker: false,
+            secret: encrypt(key, resource.id, secrets[resource.id]!) }),
+          catalog: catalog.map(record => oldCatalog.get(record.id) ?? (record.type === 'project'
+            ? { ...record, scanEnabled: false, refreshRequired: true } : record)),
+        }
+      })
+      return this.#commit(state)
+    })
+  }
+
   resourceCredentials(environmentId: string, id: string, expectedRevision: number, worker: boolean) {
     return this.#execute(async (state, key) => {
       assertRevision(state, expectedRevision)
@@ -306,13 +472,17 @@ export class ManagedStore {
   async #commit(state: State): Promise<ManagedView> {
     assertCollections(state)
     if (state.revision >= Number.MAX_SAFE_INTEGER) throw unavailable()
-    state.version = 2
     state.revision++
+    return viewOf(await this.#writeState(state))
+  }
+
+  async #writeState(state: State): Promise<State> {
+    state.version = 3
     const parsed = StateSchema.parse(state)
     const encoded = Buffer.from(JSON.stringify(parsed), 'utf8')
     if (encoded.length > MAX_STATE_BYTES) throw unavailable()
     await this.#atomicWrite('state.json', encoded)
-    return viewOf(parsed)
+    return parsed
   }
 
   async #load(): Promise<{ state: State, key: Buffer }> {
@@ -331,11 +501,13 @@ export class ManagedStore {
         const state: State = { version: 2, revision: 0, environments: [] }
         await this.#atomicWrite('master.key', key, true)
         await this.#atomicWrite('state.json', Buffer.from(JSON.stringify(state)), true)
+        ensureShared(state)
         return { state, key }
       }
       if (key.length !== 32 || json === null) throw unavailable()
       const state = StateSchema.parse(JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(json)))
       try {
+        ensureShared(state)
         assertCollections(state)
         // Authenticate all stored secrets before exposing any supposedly healthy snapshot.
         for (const environment of state.environments) {

@@ -439,11 +439,15 @@ The independent remote-ops tool plugin preserves legacy inventoryFile/OpenSSH mo
 | `src/remote-ops/runner.ts` | Bounded stdout/stderr, timeout/cancellation/process-group cleanup, shared connection slots for tests/probes/diagnostics, managed transport adapter and per-server evidence without workspace switching |
 | `src/remote-ops/managed-types.ts` | Strict public UI write schemas, password-free environment/host DTOs and non-sensitive errors; browser consumers import types only |
 | `src/remote-ops/managed-store.ts` | Private lazy AES-256-GCM vault: UUID AAD, owner/permission/file-type checks, atomic snapshots, serialized revision CAS, credential-free views and drain-on-close |
+| `src/remote-ops/catalog-types.ts` | Stable shared-environment ID, project/relationship/person/team schemas and explicit per-project model consent |
+| `src/remote-ops/repository.ts` | Bounded read-only Git object access, commit-diff layer snapshots, filtered model evidence and two Markdown views |
+| `src/remote-ops/project-refresh.ts` | Commit polling, manual refresh, cancellation, bounded tool-free DSH model summaries and retained good snapshots |
+| `src/remote-ops/portable.ts` | Strict versioned import/export contract, conflict-free ID merge planning and missing-credential preview |
 | `src/remote-ops/password-ssh.ts` | ssh2 password authentication, unauthenticated fingerprint probe, strict fingerprint pins, bounded command output and cancellable connection-only tests |
 | `src/remote-ops/managed.ts` | Owns the encrypted store, endpoint/revision-bound SSH trust, and short-lived website logins scoped to an agent, resource, mode and vault revision |
 | `src/remote-ops/resource-checks.ts` | TLS PostgreSQL checks and OMS, WorksBase Community and ZenTao Web/API authentication, read-only access and response redaction |
 | `src/remote-ops/api.ts`, `http.ts` | Independent `/environment-resources` page and credential-safe management API on the local DSH web server |
-| `src/remote-ops/client.tsx`, `page.tsx`, `theme.css` | Standalone bilingual environment/host/Compose manager, inline CRUD, revision checks, ephemeral password inputs and SSH trust |
+| `src/remote-ops/client.tsx`, `page.tsx`, `theme.css` | Shared bilingual settings and standalone UI: connection and catalog CRUD, revision-checked import/export, Git summaries, ephemeral passwords and SSH trust |
 | `src/mobile/gateway.ts` | Private HTTP listener: password login, bounded authentication, fixed loopback task projections, allowlisted JSON conversation writes and cancellable SSE forwarding |
 | `src/mobile/cli.ts` | Private password-hash setup, password changes and foreground viewer lifecycle; leaves the DSH profile unchanged |
 | `src/mobile/view.html`, `view.js`, `view.css` | Touch task/conversation tabs, safe text rendering, pagination/history, in-page drafts, stable submission IDs and visibility-aware polling/streaming |
@@ -494,6 +498,8 @@ The Source entries under `src/sources` are built by `tsdown.config.ts` and expor
 | `tests/remote-ops-store.spec.ts` | Vault file permissions, restart/decryption, no plaintext snapshots, CAS/uniqueness, pin invalidation, tamper/UUID replay/key loss and atomic failure recovery |
 | `tests/remote-ops-password.spec.ts` | Real password authentication against ephemeral loopback SSH fixtures, no-auth fingerprint probes, changed-key refusal before password, bounded output, timeout and cancellation |
 | `tests/remote-ops-http.spec.ts` | Same-origin remote CRUD, secret-free GET/errors, trust-token expiry/revision/single-use, managed tools, disconnect/disposal cancellation and vault drain-on-stop |
+| `tests/remote-ops-catalog.spec.ts` | Shared scope, stable cross-environment project links, referential integrity and atomic credential-free portability |
+| `tests/remote-ops-repository.spec.ts` | Real Git fixtures for full scans, commit-diff updates and reusable unchanged layers |
 | `tests/panel-remote.spec.tsx` | Environment and host CRUD, optional Compose projects, password clearing/non-persistence, CAS conflict, fingerprint confirmation, actual connection status and response isolation |
 | `tests/mobile.spec.ts` | Real HTTP password login, credential-free discovery and stable fingerprints, session cookies, cross-origin/method/path restrictions, password body limits, explicit task fields and upstream failures |
 | `tests/conversations.spec.ts` | Conversation projection/privacy, retained interrupted history and failure status, concurrent/claimed-message deduplication, input admission boundaries and real ticket-engine/background-work stopping |

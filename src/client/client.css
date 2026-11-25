@@ -138,6 +138,7 @@ div.dt-preview-head { color: var(--dsw-alias-label-secondary); }
 .dt-remote-trust { border-top: 0.5px solid var(--dsw-alias-border-l2); }
 .dt-remote-project { gap: 12px; padding: 12px; }
 .dt-remote-project summary { cursor: pointer; font-size: 13px; }
+.dt-remote-markdown { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 24rem; overflow: auto; }
 .dt-remote-project .dt-grid3 { grid-template-columns: minmax(80px, 0.8fr) minmax(100px, 1fr) minmax(100px, 1fr); }
 @container (max-width: 640px) {
   .dt-remote-layout { grid-template-columns: minmax(0, 1fr); }

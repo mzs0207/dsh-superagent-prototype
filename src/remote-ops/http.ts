@@ -7,6 +7,8 @@ import { REMOTE_API, REMOTE_PAGE, type RemoteApi, type RemoteParams } from './ap
 import type { ManagedRemoteOps } from './managed.ts'
 import { DeleteSchema, EnvironmentWriteSchema, HostWriteSchema, RemoteManagementError, ResourceActionSchema, ResourceWriteSchema,
   RevisionSchema } from './managed-types.ts'
+import { CatalogWriteSchema } from './catalog-types.ts'
+import { MAX_IMPORT_BYTES } from './portable.ts'
 
 const clientPath = `${REMOTE_PAGE}/client.js`
 const page = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Environments &amp; hosts</title><script defer src="${clientPath}"></script></head><body><div id="environment-resources"></div></body></html>`
@@ -23,7 +25,11 @@ export function registerRemoteHttp(web: Context['webServer'], remote: ManagedRem
     'GET remote': () => store.view(),
     'POST remote/environments': async ({ body }) => store.createEnvironment(EnvironmentWriteSchema.parse(await body())),
     'PUT remote/environments/:environment': async ({ params, body }) => store.updateEnvironment(params.environment, EnvironmentWriteSchema.parse(await body())),
-    'DELETE remote/environments/:environment': async ({ params, body }) => store.deleteEnvironment(params.environment, DeleteSchema.parse(await body()).revision),
+    'DELETE remote/environments/:environment': async ({ params, body }) => {
+      const updated = await store.deleteEnvironment(params.environment, DeleteSchema.parse(await body()).revision)
+      remote.projects.cancelEnvironment(params.environment)
+      return updated
+    },
     'POST remote/environments/:environment/hosts': async ({ params, body }) => store.createHost(params.environment, HostWriteSchema.parse(await body())),
     'PUT remote/environments/:environment/hosts/:host': async ({ params, body }) => store.updateHost(params.environment, params.host, HostWriteSchema.parse(await body())),
     'DELETE remote/environments/:environment/hosts/:host': async ({ params, body }) => store.deleteHost(params.environment, params.host, DeleteSchema.parse(await body()).revision),
@@ -39,6 +45,37 @@ export function registerRemoteHttp(web: Context['webServer'], remote: ManagedRem
     'POST remote/environments/:environment/resources/:resource/check': async ({ params, body, signal }) => {
       const { revision, action } = z.object({ revision: RevisionSchema, action: ResourceActionSchema.shape.action }).strict().parse(await body())
       return remote.check({ ...params, action }, signal, false, revision)
+    },
+    'POST remote/environments/:environment/catalog': async ({ params, body }) => {
+      const input = CatalogWriteSchema.parse(await body())
+      const updated = await store.saveCatalog(params.environment, undefined, input)
+      if (input.type === 'project') {
+        const id = updated.environments.find(env => env.id === params.environment)?.catalog?.at(-1)?.id
+        remote.projects.queue(id)
+      }
+      return updated
+    },
+    'PUT remote/environments/:environment/catalog/:resource': async ({ params, body }) => {
+      const input = CatalogWriteSchema.parse(await body())
+      const updated = await store.saveCatalog(params.environment, params.resource, input)
+      if (input.type === 'project') remote.projects.queue(params.resource)
+      return updated
+    },
+    'DELETE remote/environments/:environment/catalog/:resource': async ({ params, body }) => {
+      const updated = await store.deleteCatalog(params.environment, params.resource, DeleteSchema.parse(await body()).revision)
+      remote.projects.queue(params.resource)
+      return updated
+    },
+    'GET remote/environments/:environment/projects/:resource/summary': ({ params }) => remote.projects.view(params.environment, params.resource),
+    'POST remote/environments/:environment/projects/:resource/summary': async ({ params }) => {
+      await remote.projects.run(params.environment, params.resource)
+      return remote.projects.view(params.environment, params.resource)
+    },
+    'GET remote/export': () => store.exportCatalog(),
+    'POST remote/import/preview': async ({ body }) => store.previewImport(z.object({ bundle: z.unknown() }).strict().parse(await body()).bundle),
+    'POST remote/import': async ({ body }) => {
+      const { revision, bundle, passwords } = z.object({ revision: RevisionSchema, bundle: z.unknown(), passwords: z.unknown() }).strict().parse(await body())
+      return store.importCatalog(bundle, revision, passwords)
     },
   }
   return web.register({ kind: 'prefix', path: REMOTE_PAGE, handler: async (req, res) => {
@@ -63,7 +100,7 @@ export function registerRemoteHttp(web: Context['webServer'], remote: ManagedRem
       const route = match(routes, method, pathname.slice(REMOTE_API.length).split('/'))
       if (!route) throw new RouteError(404, 'Unknown operation')
       const data = await route.run({ params: route.params as never, body: async () => {
-        const value = await readBody(req)
+        const value = await readBody(req, pathname === `${REMOTE_API}remote/import` || pathname === `${REMOTE_API}remote/import/preview` ? MAX_IMPORT_BYTES : undefined)
         signal.throwIfAborted()
         return value
       }, signal })

@@ -340,7 +340,7 @@ function saveRemoteResource(environmentId: string, input: unknown, id?: string) 
 }
 const REMOTE_FINGERPRINT = `SHA256:${'a'.repeat(43)}`
 
-const ROUTES: { [K in keyof Api]: Route<K> } = {
+const ROUTES: { [K in keyof SuperagentApi]: Route<K> } & { [K in keyof RemoteApi]?: Route<K> } = {
   'GET remote': { answer: async () => { const view = remoteView(); await server.remoteWaiting?.('get'); return view } },
   'POST remote/environments': { body: true, answer: ({ body }) => {
     const parsed = EnvironmentWriteSchema.safeParse(body)
@@ -583,7 +583,8 @@ function match(method: string, segments: string[]) {
   return undefined
 }
 async function run<K extends keyof Api>(key: K, params: Record<string, string>, query: URLSearchParams, body: unknown): Promise<Answer<K>> {
-  const route: Route<K> = ROUTES[key]
+  const route = ROUTES[key] as Route<K> | undefined
+  if (!route) return refuse(404, `Fixture does not serve ${key}`)
   const read: readonly string[] = route.query ?? []
   for (const name of query.keys()) if (!read.includes(name)) server.misuse.push(`${key} with the query parameter ${name}`)
   if ((body !== undefined) !== !!route.body) server.misuse.push(`${key} ${body === undefined ? 'without' : 'with'} a body`)

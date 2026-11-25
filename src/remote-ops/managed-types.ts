@@ -3,6 +3,7 @@ import { z } from 'zod'
 import { isIP } from 'node:net'
 import { ProjectSchema } from './inventory.ts'
 import { isWebsiteAddress, WEBSITE_SYSTEMS } from './api.ts'
+import { CATALOG_TYPES, type CatalogResource } from './catalog-types.ts'
 
 const clean = (max: number) => z.string().trim().min(1).max(max).refine(value => !/[\u0000-\u001f\u007f-\u009f]/u.test(value), 'Control characters are not allowed')
 export const RevisionSchema = z.number().int().nonnegative()
@@ -40,9 +41,10 @@ export const ResourceWriteSchema = z.discriminatedUnion('type', [
   PostgresResourceSchema.extend({ tls: z.boolean().optional(), revision: RevisionSchema, password: PasswordSchema }),
   WebsiteResourceSchema.safeExtend({ revision: RevisionSchema, password: PasswordSchema }),
 ])
-export const ResourceTypeSchema = z.enum(['linux-host', 'postgresql', 'website-account'])
+export const ResourceTypeSchema = z.enum(['linux-host', 'postgresql', 'website-account', ...CATALOG_TYPES])
 export const ResourceSearchSchema = z.object({ environment: clean(100), type: ResourceTypeSchema.optional(),
-  keyword: clean(100).optional(), resource: z.uuid().optional() }).strict()
+  keyword: clean(100).optional(), resource: z.uuid().optional(), summary: z.enum(['overview', 'detail']).optional() }).strict()
+  .refine(value => !value.summary || !!value.resource, 'A project summary requires an exact resource ID.')
 export const ResourceActionSchema = z.object({ environment: clean(100), resource: z.uuid(),
   action: z.enum(['database', 'api', 'web']) }).strict()
 export const ResourceLoginSchema = z.object({ environment: clean(100), resource: z.uuid(), mode: z.enum(['api', 'web']) }).strict()
@@ -76,7 +78,10 @@ export interface ManagedHost {
   hostKeyFingerprint: string | null
   projects: ManagedProject[]
 }
-export interface ManagedEnvironment { id: string; name: string; aliases: string[]; production: boolean; hosts: ManagedHost[]; resources?: ManagedResource[] }
+export interface ManagedEnvironment {
+  id: string; name: string; aliases: string[]; production: boolean; shared?: true
+  hosts: ManagedHost[]; resources?: ManagedResource[]; catalog?: CatalogResource[]
+}
 export interface ManagedView { revision: number; environments: ManagedEnvironment[] }
 export interface HostKeyProbe { fingerprint: string; token: string; expiresAt: string }
 export interface ConnectionTest { ok: boolean; message: string; durationMs: number }

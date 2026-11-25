@@ -8,11 +8,13 @@ import { ManagedRemoteOps } from '../src/remote-ops/managed.ts'
 import { apply, Config } from '../src/remote-ops/index.ts'
 import type { ProcessResult } from '../src/remote-ops/runner.ts'
 import type { ManagedView, HostKeyProbe } from '../src/remote-ops/managed-types.ts'
+import { SHARED_ENVIRONMENT } from '../src/remote-ops/catalog-types.ts'
 
 const dirs: string[] = [], services: ManagedRemoteOps[] = []
 afterEach(async () => { vi.useRealTimers(); await Promise.all(services.splice(0).map(service => service.stop())); await Promise.all(dirs.splice(0).map(dir => rm(dir, { recursive: true, force: true }))) })
 const fingerprint = `SHA256:${'A'.repeat(43)}`
 const secret = ' fixture password $;&\' '
+const shared = { id: SHARED_ENVIRONMENT, name: '公用环境', aliases: [], production: false, shared: true, hosts: [] }
 const processResult = (extra: Partial<ProcessResult> = {}): ProcessResult => ({ ok: true, exitCode: 0, signal: null,
   stdout: 'fixture output', stderr: '', truncated: false, timedOut: false, cancelled: false, durationMs: 5, ...extra })
 async function host() {
@@ -49,9 +51,9 @@ async function host() {
 
 it('manages empty environments and password hosts through same-origin API without ever returning secrets', async () => {
   const h = await host()
-  expect(await h.call('GET')).toMatchObject({ status: 200, body: { revision: 0, environments: [] } })
+  expect(await h.call('GET')).toMatchObject({ status: 200, body: { revision: 0, environments: [shared] } })
   const created = await h.create()
-  expect(created.view).toMatchObject({ revision: 2, environments: [{ name: '开发环境V2', hosts: [{ auth: 'password', hasPassword: true, hostKeyFingerprint: null }] }] })
+  expect(created.view).toMatchObject({ revision: 2, environments: [{ name: '开发环境V2', hosts: [{ auth: 'password', hasPassword: true, hostKeyFingerprint: null }] }, shared] })
   expect(JSON.stringify(created.view)).not.toContain(secret)
   expect(JSON.stringify((await h.call('GET')).body)).not.toMatch(/ciphertext|"password"\s*:|master\.key/)
   expect(h.probe).not.toHaveBeenCalled(); expect(h.run).not.toHaveBeenCalled()
@@ -60,7 +62,7 @@ it('manages empty environments and password hosts through same-origin API withou
   expect(edited).toMatchObject({ status: 200, body: { revision: 3 } })
   expect((await h.remote.store.credentials(created.environment, created.id, 3)).password).toBe(secret)
   const removed = await h.call('DELETE', `environments/${created.environment}`, { revision: 3 })
-  expect(removed).toMatchObject({ status: 200, body: { revision: 4, environments: [] } })
+  expect(removed).toMatchObject({ status: 200, body: { revision: 4, environments: [shared] } })
 })
 it('rejects CSRF, foreign host/origin and oversized or invalid credential bodies before persisting', async () => {
   const h = await host()
@@ -69,7 +71,7 @@ it('rejects CSRF, foreign host/origin and oversized or invalid credential bodies
   }
   expect((await h.call('POST', 'environments', '{')).status).toBe(400)
   expect((await h.call('POST', 'environments', { revision: 0, name: 'x'.repeat(128 * 1024) })).status).toBe(400)
-  expect((await h.call('GET')).body).toEqual({ revision: 0, environments: [] })
+  expect((await h.call('GET')).body).toEqual({ revision: 0, environments: [shared] })
   const created = await h.create()
   const invalid = await h.call('PUT', created.path, { revision: 2, name: 'bad', host: '--options', username: 'diagnostics', password: secret })
   expect(invalid.status).toBe(400); expect(JSON.stringify(invalid)).not.toContain(secret)
@@ -84,7 +86,7 @@ it('requires endpoint-bound fingerprint confirmation before sending a password; 
   expect(JSON.stringify(h.probe.mock.calls)).not.toContain(secret)
   expect((await h.call('POST', `${created.path}/trust`, { revision: 2, token: 'not-a-token' })).status).toBe(400)
   const trusted = await h.call('POST', `${created.path}/trust`, { revision: 2, token: probe.body.token })
-  expect(trusted).toMatchObject({ status: 200, body: { revision: 3, environments: [{ hosts: [{ hostKeyFingerprint: fingerprint }] }] } })
+  expect(trusted).toMatchObject({ status: 200, body: { revision: 3, environments: [{ hosts: [{ hostKeyFingerprint: fingerprint }] }, shared] } })
   expect((await h.call('POST', `${created.path}/trust`, { revision: 2, token: probe.body.token })).status).toBe(400)
   expect(await h.call('POST', `${created.path}/test`, { revision: 3 })).toMatchObject({ status: 200, body: { ok: true } })
   const sent = h.run.mock.calls[0] as unknown as [Record<string, unknown>, string | undefined]
@@ -125,6 +127,13 @@ it('opens the previous encrypted inventory and serves its management view withou
   await legacy.call('POST', `${path}/trust`, { revision: 2, token: probe.body.token })
   const previous = (await legacy.call('GET')).body
   await legacy.remote.stop()
+  const stateFile = join(legacy.dir, 'remote-ops', 'state.json')
+  const state = JSON.parse(await readFile(stateFile, 'utf8'))
+  state.version = 2
+  state.environments = state.environments.filter((env: { id: string }) => env.id !== SHARED_ENVIRONMENT)
+  delete state.environments[0].catalog
+  const legacyBytes = JSON.stringify(state)
+  await writeFile(stateFile, legacyBytes)
 
   type Tool = { name: string; execute(args: unknown, execution: { signal: AbortSignal }): Promise<unknown> }
   type Handler = (req: unknown, res: unknown) => Promise<void>
@@ -143,13 +152,14 @@ it('opens the previous encrypted inventory and serves its management view withou
     const inventory = await tools.get('remote_ops_inventory')!.execute({}, { signal: AbortSignal.timeout(1500) })
     expect(inventory).toMatchObject({ source: 'managed', environments: [{
       id: environment, aliases: ['dev2'], servers: [{ id, trusted: true, projects: [{ id: 'community' }] }],
-    }] })
+    }, { id: SHARED_ENVIRONMENT, shared: true, servers: [] }] })
     const dispatch = handlers.get('/environment-resources')!
     const writeHead = vi.fn(), end = vi.fn()
     await dispatch({ method: 'GET', url: '/environment-resources/api/remote',
       headers: { host: '127.0.0.1:3082', 'x-orchestrator-request': '1' } }, { writeHead, end })
     expect(writeHead.mock.calls[0]?.[0]).toBe(200)
     expect(JSON.parse(end.mock.calls[0]![0])).toEqual(previous)
+    expect(await readFile(stateFile, 'utf8')).toBe(legacyBytes)
     expect(end.mock.calls[0]![0]).not.toContain(secret)
   } finally { await dispose() }
   expect(handlers.size).toBe(0)
@@ -181,7 +191,7 @@ it('drains accepted vault writes and refuses new work on shutdown', async () => 
   await expect(h.remote.store.view()).rejects.toThrow('stopping')
   await expect(h.remote.store.createEnvironment({ revision: 1, name: 'must not write' })).rejects.toThrow('stopping')
   const { ManagedStore } = await import('../src/remote-ops/managed-store.ts')
-  expect(await new ManagedStore(join(h.dir, 'remote-ops')).view()).toMatchObject({ revision: 1, environments: [{ name: 'accepted before stop' }] })
+  expect(await new ManagedStore(join(h.dir, 'remote-ops')).view()).toMatchObject({ revision: 1, environments: [{ name: 'accepted before stop' }, shared] })
 })
 
 it('reports an actual failed connection result rather than asserting success', async () => {
@@ -203,7 +213,7 @@ it('stores typed resources and searchable notes without exposing stored password
   expect(account).toMatchObject({ status: 200, body: { revision: 4, environments: [{
     hosts: [{ id: existing.id, type: 'linux-host', hasPassword: true }],
     resources: [{ type: 'postgresql', name: 'OMS data' }, { type: 'website-account', name: 'OMS operator', notes: 'Refund verification only' }],
-  }] } })
+  }, shared] } })
   expect(JSON.stringify(await h.call('GET'))).not.toContain(secret)
   const found = await h.remote.findResources({ environment: 'dev2', type: 'website-account', keyword: 'refund' })
   expect(found).toMatchObject({ resources: [{ name: 'OMS operator', notes: 'Refund verification only', type: 'website-account' }] })
@@ -215,21 +225,21 @@ it('defaults new databases to plaintext and preserves TLS on records created bef
   const root = `environments/${environment}/resources`
   const fields = { type: 'postgresql', name: 'Database', host: 'db.example.invalid', database: 'app', username: 'reader', ca: 'fixture CA' }
   const created = await h.call('POST', root, { ...fields, revision: 2, password: secret })
-  expect(created).toMatchObject({ status: 200, body: { environments: [{ resources: [{ tls: false }] }] } })
+  expect(created).toMatchObject({ status: 200, body: { environments: [{ resources: [{ tls: false }] }, shared] } })
   const id = created.body.environments[0]!.resources![0]!.id
   const path = join(h.dir, 'remote-ops', 'state.json')
   const state = JSON.parse(await readFile(path, 'utf8'))
   delete state.environments[0].resources[0].tls
   const legacy = JSON.stringify(state)
   await writeFile(path, legacy)
-  expect(await h.call('GET')).toMatchObject({ status: 200, body: { environments: [{ resources: [{ id, tls: true }] }] } })
+  expect(await h.call('GET')).toMatchObject({ status: 200, body: { environments: [{ resources: [{ id, tls: true }] }, shared] } })
   expect(await readFile(path, 'utf8')).toBe(legacy)
   const route = `${root}/${id}`
   expect(await h.call('PUT', route, { ...fields, revision: 3 })).toMatchObject({
-    status: 200, body: { environments: [{ resources: [{ id, tls: true }] }] },
+    status: 200, body: { environments: [{ resources: [{ id, tls: true }] }, shared] },
   })
   expect(await h.call('PUT', route, { ...fields, revision: 4, tls: false })).toMatchObject({
-    status: 200, body: { environments: [{ resources: [{ id, tls: false, ca: 'fixture CA', hasPassword: true }] }] },
+    status: 200, body: { environments: [{ resources: [{ id, tls: false, ca: 'fixture CA', hasPassword: true }] }, shared] },
   })
   expect((await h.remote.store.resourceCredentials(environment, id, 5, false)).password).toBe(secret)
 })
@@ -410,5 +420,5 @@ it('does not carry an OMS password over to the community on the same origin', as
   const resource = created.body.environments[0]!.resources![0]!.id
   const replaced = await h.call('PUT', `${route}/${resource}`, { ...fields, revision: 3, system: 'community' })
   expect(replaced).toMatchObject({ status: 400, body: { code: 'password_required' } })
-  expect((await h.call('GET')).body).toMatchObject({ revision: 3, environments: [{ resources: [{ id: resource, system: 'oms' }] }] })
+  expect((await h.call('GET')).body).toMatchObject({ revision: 3, environments: [{ resources: [{ id: resource, system: 'oms' }] }, shared] })
 })
