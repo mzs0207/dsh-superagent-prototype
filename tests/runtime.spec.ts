@@ -1098,7 +1098,7 @@ it('leaves auto-merge to the delivery requirements, with the agent\'s own gh and
   expect(runtime.prompts.preview(runtime.prompts.current().config).worker).not.toContain('gh-merge')
 })
 
-it('runs the prepare command once for a new ticket, under the execution root with the ticket\'s environment, and fails the ticket with its output', async () => {
+it('runs the prepare command once with the ticket environment and reports a sanitized startup failure', async () => {
   const prepare = (command: string) => runtime.store.saveSettings({ ...runtime.store.settings(), executor: { ...runtime.store.settings().executor, prepare: command } })
   const runs = () => subprocess.spawn.mock.calls.map(([spec]) => spec as { argv: string[]; cwd: string; env?: Record<string, string> }).filter(spec => spec.argv[0] === 'sh')
   prepare('git -C /srv/widgets worktree add "$DSH_SUPERAGENT_DIR" -b "agent/$DSH_SUPERAGENT_NAME"')
@@ -1114,7 +1114,9 @@ it('runs the prepare command once for a new ticket, under the execution root wit
   prepare('exit 3')
   const failed = await acceptedTicket(feishu('9', '@bot 修一下标题'))
   await runtime.idle()
-  expect(runtime.store.tickets.get(failed.ticket.id)!.assignments.at(-1)).toMatchObject({ report: expect.objectContaining({ state: 'failed', summary: expect.stringContaining('The prepare command failed: fatal: no such clone') }) })
+  const report = runtime.store.tickets.get(failed.ticket.id)!.assignments.at(-1)!.report
+  expect(report).toMatchObject({ state: 'failed', summary: expect.stringContaining('prepare-failed') })
+  expect(report?.summary).not.toContain('fatal: no such clone')
   expect(waitsForPerson(runtime.store.tickets.get(failed.ticket.id)!)).toBe(true)
 })
 
@@ -1506,11 +1508,15 @@ it('relays the status-request hint when a worker\'s turn ends with no text and n
     summary: expect.stringContaining('orchestrator_ticket_request_status') })
 })
 
-it('fails a ticket at once on a worker error that is not passing, and relays it', async () => {
+it('fails a ticket at once on a non-transient worker error and relays a sanitized summary', async () => {
   const { ticket, sessionId } = await acceptedTicket()
   ;(runtime as unknown as { ctx: Context }).ctx.emit('agent/error', { agent: agents.get(sessionId), turn: 1, step: 1, error: new Error('Invalid tool schema') } as never)
-  await vi.waitFor(() => expect(runtime.store.tickets.get(ticket.id)!.assignments.at(-1)!.report).toMatchObject({ state: 'failed', summary: expect.stringContaining('Invalid tool schema') }))
-  expect(relays(runtime.masterId).at(-1)).toMatchObject({ kind: 'worker_report', ticket: { ticket_id: ticket.id }, state: 'failed' })
+  await vi.waitFor(() => expect(runtime.store.tickets.get(ticket.id)!.assignments.at(-1)!.report)
+    .toMatchObject({ state: 'failed', summary: expect.stringContaining('Worker execution failed') }))
+  const relay = relays(runtime.masterId).at(-1)
+  expect(relay).toMatchObject({ kind: 'worker_report', ticket: { ticket_id: ticket.id }, state: 'failed',
+    summary: expect.stringContaining('Worker execution failed') })
+  expect(JSON.stringify(relay)).not.toContain('Invalid tool schema')
 })
 
 it('refuses the main Session a bash command that runs sleep and a long job wait, as reports arrive by themselves, and no worker', async () => {
@@ -1642,7 +1648,8 @@ it('runs a launch that fails for a passing reason again on the launch backoff th
   const before = runs()
   const prepared = await acceptedTicket(feishu('40', '@bot 修 prepare', { root_id: undefined }))
   await runtime.idle()
-  expect(runtime.store.tickets.get(prepared.ticket.id)!.assignments.at(-1)!.report).toMatchObject({ state: 'failed', summary: expect.stringContaining('503') })
+  expect(runtime.store.tickets.get(prepared.ticket.id)!.assignments.at(-1)!.report)
+    .toMatchObject({ state: 'failed', summary: expect.stringContaining('prepare-failed') })
   expect(runs()).toBe(before + 1)
   // A retry runs the prepare command again, for the directory it left empty was removed; resuming relaunches no failed launch.
   delete answers['sh -c exit 3']

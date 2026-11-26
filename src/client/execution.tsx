@@ -106,6 +106,8 @@ export function ExecutionSettings() {
           </Field>
           <Section title={t('executorModel')} hint={t('executorModelHint')}><ModelField id="dt-worker-model" value={value.model}
             onChange={model => edit({ model })} /></Section>
+          <Section title={t('compactionModel')} hint={t('compactionModelHint')}><ModelField id="dt-compaction-model"
+            value={value.compactionModel} onChange={compactionModel => edit({ compactionModel })} compaction /></Section>
           <Field label={t('maxWorkers')} hint={t('maxWorkersHint')}>
             <Input type="number" min={LIMITS.maxWorkers.min} max={LIMITS.maxWorkers.max} required value={value.maxWorkers}
               onChange={event => edit({ maxWorkers: event.target.value })} />

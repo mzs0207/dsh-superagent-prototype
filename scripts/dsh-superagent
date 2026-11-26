@@ -233,11 +233,21 @@ def recover(args):
     # Ignore a single failed probe and leave a runtime that reports it is still starting alone.
     time.sleep(1)
     current = state(args.url)
-    if runtime_up(current) or (current and current['health'].get('runtime') == 'starting'):
+    if runtime_up(current):
         return report_status(args, pids, current)
-    if current is None:
+    starting = current is not None and current['health'].get('runtime') == 'starting'
+    if current is None or starting:
         age = subprocess.run(['ps', '-p', str(pids[0]), '-o', 'etimes='],
                              capture_output=True, text=True).stdout.strip()
+        if starting:
+            if not age.isdecimal():
+                print('Runtime is starting; process age is unknown.', file=sys.stderr)
+            elif int(age) < args.timeout:
+                print('Runtime is starting; startup grace is active.', file=sys.stderr)
+            else:
+                print('Runtime is still starting after the startup grace period; inspect the startup log. No restart was attempted.',
+                      file=sys.stderr)
+            return report_status(args, pids, current)
         if not age.isdecimal() or int(age) < args.timeout:
             print('Management endpoint is unavailable; startup grace is active or process age is unknown.', file=sys.stderr)
             return report_status(args, pids, current)

@@ -28,10 +28,12 @@ import { sourcesStatus, type SetupState } from './views/sources.ts'
 import { decisionList, search, threadDetail, threadList } from './views/threads.ts'
 import { executorLoad, ticketDetail, ticketList } from './views/tickets.ts'
 import { Conversations } from './conversations.ts'
+import type { FeishuPersonal } from './feishu-personal.ts'
 import type { OptimizationLedger } from './optimization.ts'
 
 export interface HttpHost {
   readonly store: Store
+  readonly personal: Pick<FeishuPersonal, 'view'>
   readonly optimization: Pick<OptimizationLedger, 'records' | 'summary' | 'lessons' | 'saveLesson'>
   /** Feishu message links resolved since startup, used by search to match AppLink URLs. */
   readonly sourceLinks: Pick<TextCache, 'entries'>
@@ -180,6 +182,7 @@ function routes(runtime: HttpHost, conversations: Conversations): Routes {
       const since = window ? new Date(Date.now() - 86_400_000).toISOString() : ''
       return decisionList(views(runtime), kind.split(',').filter(Boolean), offset, limit, since)
     },
+    'GET feishu-personal': () => runtime.personal.view(),
     'POST decisions/:id/dismiss': ({ params }) => { runtime.engine.dismiss(params.id); return { dismissed: true } },
     'GET tickets': ({ query }) => {
       const { state, offset, limit } = TicketsQuery.parse(query)

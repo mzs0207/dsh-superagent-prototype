@@ -107,6 +107,8 @@ After a change, the Engine emits an event from `DomainEvents` in `src/core/ports
 `trigger.received`, `trigger.followup`, `eval.started`, `decision.recorded`, `ticket.created`, `ticket.resumed`, `ticket.human-input`, `ticket.ended`, `assignment.started`, `assignment.reported`, `assignment.ended`, `thread.subscribed`, `thread.unsubscribed`, `trigger.requeued`, or `policy.changed`.
 
 Runtime turns `ticket.ended`, `trigger.requeued` and `thread.unsubscribed` into notices. A human `trigger.received` delivered to Tickets becomes a follow-up relay. Shared `changeEndNotices` sends one stable-id chat notice when a Ticket ends merged/closed, retaining existing GitHub IDs and namespacing GitLab IDs.
+`assignment.reported` queues human-intervention outbox receipts and visible notices for both Sessions. `KV.runtime.interventionEpisode` persists the active blocker's signature and ID, while `KV.runtime.intervention` tracks its ordinary Feishu receipt. Progress, human input, retry or termination withdraw the pending receipt and clear the episode: the next identical blocker gets a fresh ID, while repeats within an episode survive restart without duplicate delivery. Raw runtime errors are not automatically published to repository comments.
+
 
 ### Model
 
@@ -176,10 +178,11 @@ Failures retry with exponential backoff. Throwing `Later` defers work without co
 | `delivery` | DshExecutor | Hands a Ticket's waiting Inputs to its running Assignment, in order | 4, none while paused | 2 s doubling to 60 s; one that waits for a worker slot tries again after 2 s |
 | `relay` | Sessions | Steers a worker's report or question, or a person's follow-up, into the main Session's turn | 1, in queue order | 2 s doubling to 60 s |
 | `notice` | Sessions | Injects a notice into the main Session without waking it | 1, in queue order | 2 s doubling to 60 s |
+| `display` | Sessions | Appends a human-intervention notice to its target Session at a safe step boundary, without waking it | 1, due rows only; a deferred Session does not block others | 2 s doubling to 60 s |
 | `reply` | Outbox | Sends a message for a Channel through its Source, after the earlier messages of its Ticket to its conversation that have not failed three times; withdrawing the message cancels it | 1, none while paused | 5 s doubling to 300 s; one whose Source is off, or behind an earlier message, tries again after 5 s |
 | `memory-retain` | HindsightMemory | Retains a verified repair summary in its pinned connection/project scope; confirms the synchronous response and stores a content fingerprint | 1, none while paused or unconfigured | 10 s doubling to 300 s; stable document IDs survive retries/restarts |
 
-Each kind has a health entry under its name. It reports an error once one of its effects failed three times in a row, except `delivery`, whose failures show on their Ticket instead. Relays keep their order, and so do notices; a failed one holds back the later ones of its kind.
+Each kind has a health entry under its name. It reports an error once one of its effects failed three times in a row, except `delivery`, whose failures show on their Ticket instead. Relays and background `notice` effects keep their order; a failed one holds back the later ones of its kind. Targeted `display` effects are independent: an open step defers only that notice.
 
 ### Sources
 
@@ -225,6 +228,10 @@ Export eligibility comes from the current local lesson, not a pre-send marker. T
 
 Transient provider and network failures get three retries. Launches use effect backoff; failed turns receive continuation messages after 15, 30 and 60 seconds. `inputMessage` renders each Input from current Ticket state, and `mandateInstructions` adds the matched-rule limits for inferred work.
 
+Background waits use the pinned SDK's `waitForTreeWork`. Ending an Assignment discovers recursive descendants with `listDescendants`, interrupts them with ancestor authority, clears local parked inputs and waits for idle within a bounded deadline. It does not call `drainDescendants`, which permanently closes the root's admission; the same worker can accept new subagents on a later assignment. Nested cleanup failures are recorded separately from task outcome and exposed through allowlisted, bounded diagnostics.
+
+The final parent cancellation follows full tree settlement and result delivery, not merely descendant `whenIdle()`: SDK flush/disposal can send a late notice that would otherwise wake a worker already handed off to a person. This join shares the bounded interruption deadline.
+
 `install` subscribes to Session events; `dispose` unsubscribes. A turn end normally reports waiting, except after readiness or while human action is required. Errors report failed. At startup, `resume` reports interrupted Assignments through `assignmentInterrupted` and requeues pending launches that do not wait for a person, oldest Ticket first.
 
 ### MasterAssessor
@@ -241,6 +248,8 @@ Its `context`, `read` and `decide` methods serve `orchestrator_eval`, `orchestra
 
 Every save declares its origin: `panel`, `tool` or `sync`. Only `panel` can change the execution environment or fields listed in `SETUP_FIELDS` (`src/deployment.ts`).
 
+A target-project change rejects an unchanged nonempty custom prepare command and asks `HindsightMemory.checkRepository` to validate the private file against the newly resolved repository URL. This read-only preflight executes no prepare command and sends no memory request. Relevant cross-block changes during asynchronous checks cause a conflict rather than saving an unchecked combination; existing Tickets and queued exports are not retargeted.
+
 A Policy-version change calculates `policyEffects`, records which Tickets were notified, and calls `Engine.policyChanged`. `syncable` and `sync(id)` refresh a Source's Policy part. `refreshLabels(id)` refreshes display names.
 
 ### Prompts
@@ -255,7 +264,7 @@ Validation inherits an omitted base from the saved override, drops removed parts
 
 `Sessions` (`src/app/sessions.ts`) manages DeepSeek Harness Sessions for both roles. `ensure` creates a Session with its role's model. `install` follows agent events and registers prompts, skills and tools for managed Sessions.
 
-`prompt` delivers once per request id. `relay` and `notify` enqueue main-Session messages handled by the `relay` and `notice` effects. `src/app/notices.ts` defines their content; `delivery` checks whether a message arrived.
+`prompt` delivers once per request id. `relay` and ordinary `notify` calls enqueue main-Session messages through ordered `relay`/`notice` effects. An explicit `sessionId` on `notify` uses independent `display` effects: `AgentDelivery` appends the readable notice to the journal after any open tool-result step finishes. It never wakes the target. `src/app/notices.ts` defines background content; `delivery` checks ordinary notice admission.
 
 Each model request binds the Session to the current prompt revision. The revisions it used are stored durably: `promptVersion` identifies the active one and `mayRead` restricts which versions a worker can inspect. Registrations are tracked in one map per agent.
 
@@ -351,6 +360,7 @@ The independent remote-ops tool plugin preserves legacy inventoryFile/OpenSSH mo
 | `src/app/effects.ts` | Effects |
 | `src/app/versions.ts` | `Versions`: a record kept as numbered snapshots with a pointer to the current one, for the settings and the prompts |
 | `src/app/cache.ts` | `TextCache`: texts kept in memory within a size, the least recently used dropped first |
+| `src/app/feishu-personal.ts` | Personal read-only CLI profile, tool-free assessment, and summary cursor outside the Engine |
 | `src/app/settings.ts` | Settings |
 | `src/app/settings-history.ts` | `policyHistory`: each saved settings revision with what it changed from the one before |
 | `src/app/prompts.ts` | Prompts, `builtInParts`, the built-in parts a team may override, and `promptParts`, the order of a role's prompt sections |
@@ -409,6 +419,7 @@ The independent remote-ops tool plugin preserves legacy inventoryFile/OpenSSH mo
 | `src/sources/feishu-loops.ts` | The Feishu loops: the event consumer, history recovery, chat names and polling of subscribed topics |
 | `src/sources/feishu-channel.ts` | The Feishu Channel: topic replies, `sent` or `gone` |
 | `src/sources/feishu-read.ts` | The `feishu/` reads of a Trigger's message, its root, parent and topic, and `feishuThreadContext`, which gives them to assessments with their images |
+| `src/sources/feishu-personal-reader.ts` | Allowlisted personal chat selection, internal-group check and new text projection |
 | `src/sources/admission-context.ts` | The bounded window an assessment starts from: the first pages of a Trigger's Thread, read through its kind, and the messages around the Trigger |
 | `src/sources/feishu-image.ts` | Reads a Feishu message's image as an attachment for the assessing Session |
 | `src/client/index.tsx` | Browser entry for the Superagent sidebar and panel, the native Environments & hosts settings section, and the Plugin Manager config view |
@@ -470,6 +481,7 @@ The Source entries under `src/sources` are built by `tsdown.config.ts` and expor
 | `tests/zentao.spec.ts`, `tests/zentao-release.spec.ts` | Assigned-bug scope, pagination, deduplication, comment/resolve reconciliation, durable failure pause, native Git fix-only copying and Jenkins evidence guards |
 | `tests/commands.spec.ts` | CLI calls as the deployment's accounts, the Channels' answers, and repository-scoped GitHub calls |
 | `tests/feishu-read.spec.ts`, `tests/github-read.spec.ts` | Feishu and GitHub reads |
+| `tests/feishu-personal.spec.ts` | Personal read scope, cursor and summary persistence, no tickets or model tools |
 | `tests/gitlab-deployment.spec.ts`, `tests/gitlab-environment.spec.ts` | Private origin/project validation, role/CA checks and native Git credential isolation |
 | `tests/gitlab-commands.spec.ts`, `tests/gitlab-repository.spec.ts` | Native scoped API routing, pagination and nested repository file/tree reads |
 | `tests/gitlab-settings.spec.ts`, `tests/gitlab-source.spec.ts` | Hosting selection, opt-in Source, Issue/MR namespaces, mentions, intake/checkpoints, CI transitions, internal idempotent replies and MR lifecycle |

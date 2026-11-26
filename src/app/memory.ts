@@ -9,6 +9,7 @@ import { KV } from '../kv.ts'
 import type { Effects } from './effects.ts'
 import type { Store } from './store.ts'
 import { OPTIMIZATION_TAG, OptimizationLessonInput, privateText, type OptimizationLesson } from './optimization.ts'
+import { SetupError } from '../setup.ts'
 
 const Config = z.object({
   apiUrl: z.url().refine(value => { const u = new URL(value); return !u.username && !u.password && !u.search && !u.hash
@@ -38,14 +39,27 @@ export class HindsightMemory {
       limit: () => this.config && !host.store.settings().paused ? 1 : 0, retry: [10_000, 300_000],
     })
   }
-  async load(): Promise<void> {
+  /** Read configuration afresh for project-switch checks without changing the active connection or contacting Hindsight. */
+  private async readConfig(): Promise<Connection> {
     const file = join(this.host.stateDir, 'hindsight.json')
+    const info = await stat(file)
+    if ((info.mode & 0o077) !== 0) throw new Error('Private memory configuration must have mode 0600')
+    const result = Config.safeParse(JSON.parse(await readFile(file, 'utf8')))
+    if (!result.success) throw new Error('Invalid private Hindsight configuration')
+    return result.data
+  }
+  async checkRepository(repository: string): Promise<void> {
+    let config: Connection
+    try { config = await this.readConfig() }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return
+      throw new SetupError('memoryConfigurationInvalid')
+    }
+    if (config.repository !== repository) throw new SetupError('memoryRepositoryMismatch')
+  }
+  async load(): Promise<void> {
     try {
-      const info = await stat(file)
-      if ((info.mode & 0o077) !== 0) throw new Error('Private memory configuration must have mode 0600')
-      const result = Config.safeParse(JSON.parse(await readFile(file, 'utf8')))
-      if (!result.success) throw new Error('Invalid private Hindsight configuration')
-      this.config = result.data
+      this.config = await this.readConfig()
       if (!this.connection()) return
       this.status('ready', 'Hindsight configured; history is scoped to the bound repository')
     } catch (error) {

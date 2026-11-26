@@ -175,6 +175,21 @@ The Feishu recovery loop also discovers persisted notification roots for live Ze
 
 Before sending the root, Outbox persists that creation request's ID and text. If its response is lost, later notifications first reconcile the same request rather than electing another root, even after the normal queue failure threshold or withdrawal of the original receipt. Feishu deduplicates an ID for one hour; retries beyond that remote window cannot guarantee exactly-once delivery.
 
+### Personal Feishu observation (optional)
+
+The personal observer is separate from the Feishu bot and the work Engine. It reads new text messages in explicitly selected internal groups or human DMs. A group must still be on the user's joined-group list and marked internal. Only messages individually mentioning or naming the user in a group reach the configured Eval model, in a one-shot request without tools. The chat timeline does not expand separate thread replies or fetch attachments.
+
+If a configured conversation cannot be verified, the observer does not read that round or advance its cursor. It retries from the same point when the list recovers. Remove unavailable conversations from the allowlist to resume if they are no longer accessible.
+
+1. Use a dedicated `LARKSUITE_CLI_CONFIG_DIR` for the personal `lark-cli` login; do not change the bot wrapper. For groups, grant only `im:chat:read im:message:readonly im:message.group_msg:get_as_user`. Add `im:message.p2p_msg:get_as_user` only when enabling DMs. The separate profile prevents identity mix-ups, not access by other processes running as the same OS user.
+2. Create a private mode-`0600` `<stateDir>/feishu-personal.json`. Pin the app-specific user `open_id` and display name. Empty `groups` or `directs` means that conversation type is not queried.
+
+   ```json
+   {"cli":"/absolute/path/to/lark-cli","configDir":"/absolute/path/to/personal-cli","self":"ou_example","name":"Your Name","groups":["oc_workchat"],"directs":[]}
+   ```
+
+3. Open **Eval → Personal Feishu follow-ups**. The observer starts at the current time on first use and keeps at most 100 summaries in local SQLite, not the original message body. It never creates a Trigger or Ticket, executes a task, or replies. Global pause pauses observation. Remove the file to disable observation; sign out from the personal CLI profile to clear its login.
+
 ### Hindsight memory (optional)
 
 Create `<stateDir>/hindsight.json` with mode `0600`, outside the repository, then restart the DSH profile:
@@ -198,6 +213,10 @@ Workers receive bounded history before their first assignment. Recall has a 10-s
 Only future successful completions with a complete ZenTao verification chain are automatically retained: short root cause/change summaries, revision/build identifiers and confirmation facts. Original Bug bodies, transcripts and raw reproduction/test/live logs are excluded. Common credential-like text is rejected; authors must still keep secrets and personal data out of cause/change summaries. Ordinary `ready` reports, publication without deployment proof, and older checkpoints lacking these fields do not qualify. Other task types can recall without automatically exporting unproven conclusions.
 
 Exports use the existing durable effect queue and a stable document ID, with successful content fingerprints retained locally. Backend failures retry after 10 seconds with backoff up to five minutes; each synchronous retain attempt has a 60-second deadline and cannot reopen or fail the completed task. Pending exports never switch banks, repositories or tags when configuration changes. No existing task history is bulk-uploaded.
+
+When switching projects, wait for idle workers and update the hosting Source, the prepare command's repository/cache/base branch, and this private file's `repository`/`projectTag` together. Saving a Source does not rewrite custom shell commands or private memory configuration. Keep repository checks enabled, verify a disposable checkout, then restart the profile to load the memory binding. Existing Ticket workspaces and Session context are not migrated; do not retry an old-project task against the new deployment.
+
+Project-switch saves now run a preflight before persisting or restarting. An unchanged nonempty `executor.prepare` is refused: while processing is paused, clear it, switch the hosting Source or provider, then restore a reviewed command for the new project before resuming. The preflight does not execute or parse arbitrary shell commands, so a disposable checkout remains necessary. If `hindsight.json` exists, its format, private permissions and repository binding are re-read against the target's resolved web URL; invalid configuration blocks the save. Review `projectTag` explicitly too; it cannot be inferred from a repository URL. Concurrent account/prepare edits require reloading before saving. Failed checks leave settings, Tickets and pending exports unchanged.
 
 
 ## Install
@@ -285,8 +304,9 @@ Set the action to `wsl.exe`, with arguments like these. Replace the distribution
 Run the task once while the service is healthy; confirm it leaves the PID unchanged and inspect the task's **Last Run Result**. Only the main-service recovery command is shipped in this repository.
 
 `recover` starts a missing main service, or gracefully restarts a single unchanged DSH process after two failed runtime checks. An unavailable management endpoint is not treated as a restart signal during the process's first `--timeout` seconds (60 by default) or if its age cannot be verified. Recovery leaves healthy, still-starting, setup-blocked and source-error processes alone, refuses duplicates, and never force-kills. An unresponsive mobile process is not killed automatically.
+If the runtime still reports `starting` after `--timeout`, `recover` reports the stalled startup on standard error and leaves the process intact. Task Scheduler's **Last Run Result** is still the general exit code `1`; a hidden task does not retain the diagnostic text. Run the same action in a visible terminal to see it. For a read-only check before attempting recovery, use `scripts/dsh-superagent status --profile superagent`.
 
-If you already have a machine-specific launcher for EasyTier or the [mobile gateway](009-mobile.md), the scheduled action can call its own headless recovery entry instead. It should honor the main profile's manual-stop marker before and after main-service recovery, then probe and start a missing gateway without opening a browser. The launcher and Windows task are not installed by this repository. Disable your scheduled task to stop periodic checks, or use `scripts/dsh-superagent stop` to keep the profile intentionally stopped until the next explicit start.
+If you already have a machine-specific launcher for EasyTier or the mobile gateway (see `009-mobile.md`), the scheduled action can call its own headless recovery entry instead. It should honor the main profile's manual-stop marker before and after main-service recovery, then probe and start a missing gateway without opening a browser. The launcher and Windows task are not installed by this repository. Disable your scheduled task to stop periodic checks, or use `scripts/dsh-superagent stop` to keep the profile intentionally stopped until the next explicit start.
 
 ## Settings
 
@@ -305,6 +325,8 @@ Hosting selection has three values: `auto` (the default), `github`, and `gitlab`
 
    List personal CLIs, such as one signed in to your own account, as blocked commands.
    Common variables remain available with hosting intake off: `DSH_SUPERAGENT_REPOSITORY_PROVIDER`, `DSH_SUPERAGENT_REPOSITORY_HOST`, `DSH_SUPERAGENT_REPOSITORY`, `DSH_SUPERAGENT_REPOSITORY_URL`, `DSH_SUPERAGENT_REPOSITORY_CLONE_URL`, `DSH_SUPERAGENT_ACCOUNT`, `DSH_SUPERAGENT_COMMIT_EMAIL`. `DSH_SUPERAGENT_HEAD_REF` is the originating PR/MR head reference, otherwise `HEAD`.
+
+   **Context compaction model** selects the provider and model for Executor summaries, independently of the Executor model that does the work. It applies when an existing or new Executor Session next compacts, including before a model switch. Leave both fields blank to keep DSH's compaction settings. Choose a long-context model on a separate quota pool if compaction needs to keep working when the task provider is rate-limited. The selected provider receives the history and tool results being summarized.
 4. **Prompts.** Set the team sections: the GitHub disclosure line, review bots, the commit author and the auto-merge condition.
 
 ### Management API
@@ -313,7 +335,7 @@ The panel uses a local HTTP API that agents can also call. `SETUP.md` uses it to
 
 Send requests to `http://127.0.0.1:<port>/orchestrator/api/` with `x-orchestrator-request: 1`. The host must be `127.0.0.1:<port>` or `localhost:<port>`. Missing headers or an `Origin` from another site receive 403.
 
-API saves have the panel's permissions. They can change execution environment and setup account fields, unlike saves made through the main Session's tools.
+API saves have the panel's permissions. They can change the context compaction model, execution environment, and setup account fields, unlike saves made through the main Session's tools.
 
 Agents may rely on these routes and fields. The other routes in `src/app/api.ts` serve the panel and change with it.
 
@@ -375,12 +397,14 @@ Rebuild and restart DSH to activate automatic recording; no APK/mobile-gateway u
 If recorder initialization fails, its health remains `error`; later events cannot mark an uninitialized recorder ready. Fix the storage problem and restart DSH to initialize recording again. Task execution is not blocked.
 
 Recorded facts: task/assignment lifecycle, worker report states, explicit retries, human input/resumption, scheduled worker retries, actual effect success/failure, and prepare/launch/execution/background/cleanup failure boundaries. Failed observations include up to eight allowlisted diagnostics from nested `cause` / `AggregateError.errors`: error type, recognized OS/application code and HTTP status. Reasons include `timeout`, `network`, `rate-limited`, `http-5xx`, `type-error`, `prepare-failed` and `catalog-unavailable`; unrecognized facts remain `unknown`. Cycles and oversized chains are bounded. Worker health shows the same safe internal diagnostic chain; historical records are not backfilled. `Later` holds (pause, worker slots, earlier messages) are not failures. No raw task titles, chats/reports, tool output, error messages/stacks, accounts, recipients or credentials are copied.
+Traversal also stops after examining 64 entries, including repeated or invalid entries, even if fewer than eight diagnostics were retained.
 
 The recognized Codex login-renewal error is `auth-required`; other HTTP 401 or structured `AUTH` errors are `authentication-failed`. Only the former prompts sign-in again. Generic authentication failures prompt a check of startup credentials or model provider credentials, depending on where they occurred. Neither schedules a Worker retry or changes models. The ledger never stores error messages. A write failure takes precedence over other writes in the same commit; only a new record committed in a later transaction without errors clears recorder health `error`.
 
 Automatic Worker startup and execution failure reports contain a classification and an operator action, not raw exception text. This also keeps host error messages out of automatic Feishu and ZenTao notices.
 
 When a workspace prepare command fails before a Worker Session exists, inspect `<stateDir>/prepare-failure.json` on the host. This owner-only (`0600`) file holds the ticket ID, timestamp and up to 16,384 code units of the most recently saved diagnostic. It is overwritten by the next prepare failure and is not exposed through management, mobile, notices or the optimization ledger. Its text may contain credentials or local paths; do not share it unredacted.
+At startup, Superagent acquires the state-directory lock before removing abandoned temporary files from this writer; the last complete diagnostic remains available.
 
 Records include hashed correlation keys, timestamps, duration, application version/build timestamp, settings/prompt revisions, model-configuration fingerprints and checkpoint-presence flags. Hashes are pseudonyms, not guaranteed anonymization. Checkpoint flags mean evidence was recorded, not that arbitrary text proves success. Task-end durations include waiting since creation; assignment-start durations measure launch wait; effect durations cover one attempt. These overlap: do not sum them or call them model time/token cost. `explicit-retry` can originate in the panel, an authorized follow-up or the main agent; human inputs/resumptions are separate observations, not distinct people.
 

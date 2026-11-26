@@ -1,11 +1,12 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { startRuntime, feishu, type Host } from './fixtures/host.ts'
 import { spawnSync } from 'node:child_process'
+import { existsSync, mkdirSync, symlinkSync, writeFileSync } from 'node:fs'
 import { readFile, stat } from 'node:fs/promises'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { Store } from '../src/app/store.ts'
 import { Effects, Later } from '../src/app/effects.ts'
-import { OptimizationLedger } from '../src/app/optimization.ts'
+import { OptimizationLedger, optimizationFailure } from '../src/app/optimization.ts'
 import { HealthBoard } from '../src/infra/health.ts'
 import { Commands } from '../src/infra/commands.ts'
 
@@ -277,6 +278,25 @@ it.each(['startup', 'execution'] as const)('notifies the requester of %s failure
   }
 })
 
+it('removes only abandoned prepare diagnostics when a new Runtime opens the state directory', async () => {
+  await h.stop()
+  const file = 'prepare-failure.json'
+  const stale = `${file}.f2ec4420-badd-4ef8-9d3a-765145e4c310.tmp`
+  const other = ['prepare-failure.json.manual.tmp', 'unrelated.tmp']
+  const directory = `${file}.f2ec4420-badd-4ef8-9d3a-765145e4c311.tmp`
+  const symlink = `${file}.f2ec4420-badd-4ef8-9d3a-765145e4c312.tmp`
+  h = await startRuntime(store => {
+    const state = dirname(store.db.location()!)
+    for (const name of [file, stale, ...other]) writeFileSync(join(state, name), name, { mode: 0o600 })
+    mkdirSync(join(state, directory))
+    symlinkSync(file, join(state, symlink))
+  })
+  const { stateDir } = h.runtime.machine
+  expect(existsSync(join(stateDir, stale))).toBe(false)
+  expect(await readFile(join(stateDir, file), 'utf8')).toBe(file)
+  expect([directory, symlink, ...other].every(name => existsSync(join(stateDir, name)))).toBe(true)
+})
+
 it('measures a reported wait once per intervention episode and links its end to its start', async () => {
   const { ticket } = await h.acceptedTicket(feishu('wait-ledger', 'Repair the parser'))
   const report = { state: 'blocked' as const, summary: 'private blocker summary', waitReason: 'approval' as const }
@@ -377,4 +397,11 @@ it('bounds cyclic aggregate diagnostics and excludes arbitrary names, codes and 
   expect(failure.errors).toEqual(expect.arrayContaining([expect.objectContaining({ name: 'TypeError' })]))
   expect(failure.errors!.length).toBeLessThanOrEqual(8)
   expect(JSON.stringify(failure)).not.toMatch(/private|secret-value/)
+})
+
+it('bounds examined aggregate entries even when they are duplicates or invalid', () => {
+  const aggregate = new AggregateError([])
+  aggregate.errors.push(...Array.from({ length: 200 }, (_, i) => i % 2 ? null : aggregate))
+  aggregate.errors.push(Object.assign(new Error('Unavailable'), { status: 503 }))
+  expect(optimizationFailure(aggregate).reason).toBe('unknown')
 })

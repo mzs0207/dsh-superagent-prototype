@@ -74,8 +74,13 @@ export class AgentDelivery {
     const id = messageId(requestId)
     const pending = [...agent.inbox.nextTurn, ...agent.inbox.nextStep].some(message => deliveryId(message) === id)
     if (!seen.ids.has(id) && !pending) {
-      const source = typeof mode === 'object' ? { kind: 'dsh-superagent' as const, form: 'notice' as const, summary: 'display' in mode ? mode.display : mode.inject }
-        : { kind: 'dsh-superagent' as const, form: 'relay' as const }
+      let source: UserMessage['source']
+      if (typeof mode === 'object') {
+        const summary = 'display' in mode ? mode.display : mode.inject
+        source = { kind: 'dsh-superagent', form: 'notice', summary }
+      } else {
+        source = { kind: 'dsh-superagent', form: 'relay' }
+      }
       const message = freezeMessage({ id, role: 'user' as const, content: [{ type: 'text' as const, text }], source })
       if (typeof mode === 'object') {
         if ('display' in mode) {

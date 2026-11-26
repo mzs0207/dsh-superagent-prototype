@@ -69,7 +69,9 @@ function SwitchRow({ label, hint, checked,
   </div>
 }
 type RoleModel = Settings['eval']['model']
-export function ModelField({ id, value, onChange }: { id: string; value: RoleModel; onChange: (next: RoleModel) => void }) {
+export function ModelField({ id, value, onChange, compaction = false }: {
+  id: string; value: RoleModel; onChange: (next: RoleModel) => void; compaction?: boolean
+}) {
   const { t, call } = usePanel()
   const [catalog, setCatalog] = useState<ApiResponse<'GET models'>>()
   const [error, setError] = useState<string>()
@@ -81,25 +83,26 @@ export function ModelField({ id, value, onChange }: { id: string; value: RoleMod
   }
   const models = catalog?.groups.find(group => group.id === current.provider.trim())?.models ?? []
   const fallback = catalog?.default
+  const inherit = t(compaction ? 'compactionModelInherit' : 'modelInherit')
   const input = (name: keyof typeof current, label: string, placeholder: string) => <Field label={label}>
     <Input list={`${id}-${name}s`} spellCheck={false} placeholder={placeholder} value={current[name]}
       onChange={event => set({ [name]: event.target.value })} />
   </Field>
   return <div className="dt-model">
-    <Hint>{fallback ? t('defaultModel', { model: `${fallback.provider} / ${fallback.model}${fallback.reasoningEffort
-      ? ` · ${fallback.reasoningEffort}` : ''}` }) : t('defaultModelUnavailable')}</Hint>
+    {!compaction && <Hint>{fallback ? t('defaultModel', { model: `${fallback.provider} / ${fallback.model}${fallback.reasoningEffort
+      ? ` · ${fallback.reasoningEffort}` : ''}` }) : t('defaultModelUnavailable')}</Hint>}
     {error && <p className="dt-error">{t('modelCatalogError', { error })}</p>}
-    <div className="dt-grid3">
-      {input('provider', t('modelProvider'), t('modelInherit'))}{input('model', t('modelName'), t('modelInherit'))}{input('effort',
-        t('modelEffort'), t('modelEffortDefault'))}
+    <div className={compaction ? 'dt-grid2' : 'dt-grid3'}>
+      {input('provider', t('modelProvider'), inherit)}{input('model', t('modelName'), inherit)}
+      {!compaction && input('effort', t('modelEffort'), t('modelEffortDefault'))}
     </div>
     <datalist id={`${id}-providers`}>{catalog?.groups.map(group => <option key={group.id}
       value={group.id}>{group.name}</option>)}</datalist>
     <datalist id={`${id}-models`}>{models.map(model => <option key={model.id} value={model.id}>{model.name}</option>)}</datalist>
-    <datalist id={`${id}-efforts`}>
+    {!compaction && <datalist id={`${id}-efforts`}>
       {(models.find(model => model.id === current.model.trim())?.reasoning?.efforts ?? []).map(effort => <option key={effort.id}
         value={effort.id}>{effort.name}</option>)}
-    </datalist>
+    </datalist>}
   </div>
 }
 

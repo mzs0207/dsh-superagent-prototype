@@ -12,6 +12,24 @@ import { ConfigHistory, Field, Fields, ModelField, SourceField, numberOf, useBlo
 import { localized, valueLabel, when } from './text.ts'
 import { Hint, LabelValue, LoadMore, LoadState, Section, StatusHead } from './widgets.tsx'
 
+function PersonalTodos() {
+  const { t, call } = usePanel()
+  const { data } = usePoll(() => call('GET feishu-personal'), [])
+  if (!data || data.state === 'off') return null
+  return <Section title={t('personalTodoTitle')} hint={t(`personalTodoState.${data.state}`)}>
+    {data.items.length ? <ul className="dt-list">{data.items.map(item => <li key={item.id} className="dt-row">
+      <div className="dt-row-main">
+        <strong>{item.title}</strong>
+        <div>{item.action}</div>
+        <div className="dt-row-meta">{t(`personalTodoKind.${item.kind}`)} · {when(new Date(item.at).toISOString(), t('lang'))}
+          {' · '}<a className="dt-textlink" target="_blank" rel="noreferrer"
+            href={`https://applink.feishu.cn/client/chat/open?openChatId=${encodeURIComponent(item.chat)}`}>{t('personalOpenChat')}</a>
+        </div>
+      </div>
+    </li>)}</ul> : <Hint>{t('personalNoTodos')}</Hint>}
+  </Section>
+}
+
 export function EvalStatus({ filter, window, paused }: { filter: DecisionFilter; window: '24h' | undefined; paused: boolean }) {
   const { t, call, navigate } = usePanel()
   const [limit, setLimit] = useState(30)
@@ -21,6 +39,7 @@ export function EvalStatus({ filter, window, paused }: { filter: DecisionFilter;
     ...last24h ? { window: '24h' } : {} } }, true)
   return <>
     <StatusHead hint={t('evalStatusIntro')} settings="eval" />
+    <PersonalTodos />
     {paused && <p className="dt-banner">
       {t('evalRecordsPaused')} <button type="button" className="dt-textlink"
         onClick={() => navigate({ page: 'execution' })}>{t('resumeWhere')}</button>

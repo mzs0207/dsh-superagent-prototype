@@ -58,13 +58,13 @@ export class Setup {
   /** Defer the restart to the next macrotask so the current HTTP or tool caller receives its response first. */
   restart(): void { setTimeout(this.host.restart, 0) }
   /** Verify account CLIs for a modified source block before saving, ignoring setup errors belonging to other blocks. */
-  async checkAccounts(block: SettingsBlock, settings: Settings): Promise<void> {
+  async checkAccounts(block: SettingsBlock, settings: Settings): Promise<Deployment | undefined> {
     const { machine } = this.host
     if (block === 'source:feishu') { await resolveFeishuBot(machine, settings.sources.feishu?.config, this.probe()); return }
     const provider = block === 'source:gitlab' ? 'gitlab' : block === 'source:github' ? 'github' : selectRepositoryProvider(settings).provider
     // Saving Automatic must be possible before either account is configured; run() reports what is missing.
     if (!provider) return
-    await resolveDeployment(machine, settings.sources[provider]?.config, this.probe(), this.path, provider)
+    return resolveDeployment(machine, settings.sources[provider]?.config, this.probe(), this.path, provider)
   }
   async blockCommands(blocked: readonly string[]): Promise<void> {
     if (this.resolved) await writeEnvironment(this.resolved, blocked)

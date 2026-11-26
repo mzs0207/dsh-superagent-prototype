@@ -164,6 +164,17 @@ it('leaves a new process alive while its management port is unavailable, then re
   expect(existsSync(join(root, 'tmux.log'))).toBe(false)
 })
 
+it.each([false, true])('distinguishes startup grace from a stuck runtime (expired: %s) without restarting', async expired => {
+  const pid = sleeper()
+  processes(service(pid))
+  if (expired) writeFileSync(join(root, 'old-process'), '')
+  const url = await answering({ ...READY, health: { runtime: { state: 'starting' } } }, true)
+  const statusText = expired ? 'Runtime is still starting after the startup grace period' : 'Runtime is starting; startup grace is active'
+  expect(await run('recover', '--url', url)).toMatchObject({ code: 1, stderr: expect.stringContaining(statusText) })
+  expect((await status('superagent', url)).pids).toEqual([pid])
+  expect(existsSync(join(root, 'tmux.log'))).toBe(false)
+})
+
 it.each([
   [0, READY],
   [2, { ...READY, health: { ...READY.health, github: { state: 'error', detail: 'bad credential' } } }],

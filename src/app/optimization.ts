@@ -70,11 +70,14 @@ const ERROR_CODES: Readonly<Record<string, string>> = {
   PREPARE_FAILED: 'prepare-failed', SUBAGENT_CATALOG_UNAVAILABLE: 'catalog-unavailable',
   AUTH: 'authentication-failed',
 }
-/** Follow causes and aggregates, retaining at most eight allowlisted diagnostics and never free-form error text. */
+/** Visit at most 64 entries (including repeats), retaining at most eight allowlisted diagnostics. */
 export function optimizationFailure(error: unknown): FailureObservation {
   const errors: FailureDiagnostic[] = [], seen = new Set<unknown>()
+  let remaining = 64
   const visit = (value: unknown): void => {
-    if (!value || typeof value !== 'object' || seen.has(value) || errors.length === 8) return
+    if (remaining === 0 || errors.length === 8) return
+    remaining--
+    if (!value || typeof value !== 'object' || seen.has(value)) return
     seen.add(value)
     const row = value as { name?: unknown; code?: unknown; status?: unknown; message?: unknown; cause?: unknown; errors?: unknown }
     const name = typeof row.name === 'string' && Object.hasOwn(ERROR_NAMES, row.name) ? row.name : undefined
@@ -89,8 +92,11 @@ export function optimizationFailure(error: unknown): FailureObservation {
     else if (status && status >= 500) reason = 'http-5xx'
     else if (reason === 'unknown' && name === 'TypeError') reason = 'type-error'
     errors.push({ reason, ...(name ? { name } : {}), ...(code ? { code } : {}), ...(status ? { status } : {}) })
-    visit(row.cause)
-    if (Array.isArray(row.errors)) for (const child of row.errors) { if (errors.length === 8) break; visit(child) }
+    if (row.cause !== undefined) visit(row.cause)
+    const children = row.errors
+    if (Array.isArray(children)) {
+      for (let i = 0; i < children.length && remaining > 0 && errors.length < 8; i++) visit(children[i])
+    }
   }
   visit(error)
   const specific = errors.find(row => row.reason === 'auth-required')

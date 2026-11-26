@@ -3,6 +3,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { randomUUID } from 'node:crypto'
+import { readdirSync, rmSync } from 'node:fs'
 import { mkdir, rename, rm, rmdir, stat, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { key, latestAssignment, latestReport, liveTicket, runningAssignment, threadKey, waitsForPerson } from '../core/index.ts'
@@ -29,6 +30,20 @@ export const workerSessionId = (ticketId: string): string => `worker-${ticketId}
 export const ticketOfSession = (sessionId: string): string | undefined => sessionId.startsWith('worker-') ? sessionId.slice('worker-'.length) : undefined
 /** Maximum runtime for a workspace prepare command. */
 const PREPARE_TIMEOUT_MS = 10 * 60_000
+const PREPARE_FAILURE_FILE = 'prepare-failure.json'
+const PREPARE_FAILURE_PREFIX = `${PREPARE_FAILURE_FILE}.`
+const PREPARE_FAILURE_TEMP_SUFFIX = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.tmp$/
+
+/** Called under the state-directory lock, before any prepare command can start. */
+export function clearAbandonedPrepareFailures(stateDir: string): void {
+  for (const entry of readdirSync(stateDir, { withFileTypes: true })) {
+    if (!entry.isFile() || !entry.name.startsWith(PREPARE_FAILURE_PREFIX)) continue
+    if (PREPARE_FAILURE_TEMP_SUFFIX.test(entry.name.slice(PREPARE_FAILURE_PREFIX.length))) {
+      rmSync(join(stateDir, entry.name), { force: true })
+    }
+  }
+}
+
 /** Maximum transient retry attempts for a launch or worker turn, and the initial backoff before resuming a turn. */
 const TRANSIENT_TRIES = 3, TRANSIENT_BACKOFF_MS = 15_000
 /** How long a worker's background work may run on after its turn ended before it is stopped and the worker reported waiting. */
@@ -280,8 +295,8 @@ export class DshExecutor implements Executor {
   }
   /** Store only the last prepare failure; raw command diagnostics never become a ticket report or outgoing message. */
   private async savePrepareFailure(ticketId: string, detail: string): Promise<void> {
-    const path = join(this.host.machine.stateDir, 'prepare-failure.json')
-    const temporary = `${path}.${randomUUID()}.tmp`
+    const path = join(this.host.machine.stateDir, PREPARE_FAILURE_FILE)
+    const temporary = join(this.host.machine.stateDir, `${PREPARE_FAILURE_PREFIX}${randomUUID()}.tmp`)
     try {
       await writeFile(temporary, JSON.stringify({ ticketId, at: now(), detail: detail.slice(0, 16_384) }) + '\n',
         { mode: 0o600, flag: 'wx' })

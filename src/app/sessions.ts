@@ -46,6 +46,10 @@ interface SessionBinding { disposers: (() => void)[]; scope?: Context; skills?: 
 
 /** The agent presets Executor Sessions and the main Session are created with, which the bundle's patch defines. */
 export const WORKER_PRESET = 'dsh-superagent-worker', ROUTER_PRESET = 'dsh-superagent-router'
+// DSH's compaction plugin declares this auxiliary purpose but is loaded from the preset, not imported here.
+declare module '@deepseek-ai/dsh-llm/types' {
+  interface LlmRequestPurposeMap { compaction: true }
+}
 declare module '@deepseek-ai/cordis' {
   interface Events {
     /** DSH's agent preset registry selected `agentPreset` for a Session. */
@@ -108,6 +112,25 @@ export class Sessions {
   /** Subscribes to host agent and session events so newly created sessions are decorated and model-budget retries are reflected in health. Call once at startup. */
   install(): void {
     const ctx = this.ctx
+    const { store } = this.host
+    ctx.on('llm/stream', function (options, next) {
+      if (options.purpose !== 'compaction' || !options.sessionId) return next()
+      const ticketId = ticketOfSession(options.sessionId)
+      if (!ticketId || !store.tickets.get(ticketId)) return next()
+      const model = store.settings().executor.compactionModel
+      if (!model) return next()
+      const llm = this
+      return (async function* () {
+        // The checkpoint records the original options object, so update it before dispatch.
+        if (options.maxTokens !== undefined) {
+          const { defaultMaxTokens } = await llm.resolveModelInfo(model.provider, model.model, options.signal)
+          if (defaultMaxTokens !== undefined) options.maxTokens = Math.min(options.maxTokens, defaultMaxTokens)
+        }
+        options.provider = model.provider
+        options.model = model.model
+        yield* next()
+      })()
+    }, { prepend: true })
     ctx.on('agent/disposed', ({ agent }) => {
       this.release(agent)
       this.retryHealth.clear(agent.id); this.updateModelHealth()

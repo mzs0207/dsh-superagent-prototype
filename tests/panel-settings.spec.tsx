@@ -52,8 +52,11 @@ it('saves the Eval block on the Policy settings and the Executor with its execut
   await type(workerProvider as HTMLInputElement, 'worker-provider'); await type(workerModel as HTMLInputElement,
     'worker-model'); await type(effort as HTMLInputElement, 'high')
   expect([...document.querySelectorAll('#dt-worker-model-efforts option')].map(option => option.getAttribute('value'))).toEqual(['high'])
+  const compaction = { provider: 'summary-provider', model: 'summary-model' }
+  await type(document.querySelector<HTMLInputElement>('input[list="dt-compaction-model-providers"]')!, compaction.provider)
+  await type(document.querySelector<HTMLInputElement>('input[list="dt-compaction-model-models"]')!, compaction.model)
   await click(zh.save)
-  expect(server.settings.executor).toEqual({ repositoryProvider: 'auto', maxWorkers: 5, directory: '/srv/work',
+  expect(server.settings.executor).toEqual({ repositoryProvider: 'auto', compactionModel: compaction, maxWorkers: 5, directory: '/srv/work',
     prepare: 'git worktree add "$DSH_SUPERAGENT_DIR"', blockedCommands: ['gh-personal', 'gh.other'], model: { provider: 'worker-provider',
       model: 'worker-model', reasoningEffort: 'high' } })
   expect(server.requests.filter(request => request.method === 'PUT').map(request => request.path)).toEqual(['settings/eval',

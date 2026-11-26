@@ -2,7 +2,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { z } from 'zod'
 import { UserError, type EngineForSettings } from '../core/index.ts'
-import { EvalConfigSchema, ExecutorConfigSchema, PolicyConfigSchema, SettingsSchema, policyEffects, policyVersion } from '../policy.ts'
+import { EvalConfigSchema, ExecutorConfigSchema, PolicyConfigSchema, SettingsSchema, policyEffects, policyVersion, selectRepositoryProvider } from '../policy.ts'
 import type { Settings as SettingsValue, SettingsBlock, SettingsOrigin, SettingsSave } from '../policy.ts'
 import type { SourceHost } from '../sources/host.ts'
 import type { HealthBoard, HealthEntry } from '../infra/health.ts'
@@ -13,6 +13,9 @@ import type { Sessions } from './sessions.ts'
 import { setupChanged, type Setup } from './setup.ts'
 import type { Store } from './store.ts'
 import { KV } from '../kv.ts'
+import { gitlabOrigin, repositoryScope } from '../deployment.ts'
+import { SetupError } from '../setup.ts'
+import type { HindsightMemory } from './memory.ts'
 
 /**
  * Indicates an optimistic concurrency conflict when saving or syncing a settings block against a stale revision.
@@ -22,6 +25,14 @@ export class SettingsConflict extends Error {}
 const now = (): string => new Date().toISOString()
 /** Executor settings that control shell execution paths, prepare commands, and command shims. */
 const environment = ({ executor }: SettingsValue) => JSON.stringify([executor.directory, executor.prepare, executor.blockedCommands])
+/** Compare active repository identities, not account/polling edits or an unselected hosting Source. */
+const project = (settings: SettingsValue): string | undefined => {
+  const { provider } = selectRepositoryProvider(settings)
+  const config = provider && settings.sources[provider]?.config
+  if (!provider || !config || typeof config.repository !== 'string' || !config.repository.trim()) return
+  try { return repositoryScope(provider, provider === 'github' ? 'https://github.com' : gitlabOrigin(String(config.host ?? '')), config.repository) }
+  catch { return undefined } // Invalid previous configuration must remain repairable.
+}
 
 /** Schema parser, settings merger, and non-panel origin guard for one settings block kind. */
 interface Block {
@@ -41,8 +52,12 @@ const BLOCKS: Record<'policy' | 'eval' | 'executor' | 'source', Block> = {
   executor: {
     parse: value => ExecutorConfigSchema.parse(value),
     merge: (settings, value) => ({ ...settings, executor: value as SettingsValue['executor'] }),
-    // Only the management panel may modify shell execution paths or commands.
-    guard: (current, candidate, origin) => { if (origin !== 'panel' && environment(current) !== environment(candidate)) throw new UserError('panelOnlyEnvironment') },
+    guard: (current, candidate, origin) => {
+      if (origin === 'panel') return
+      if (environment(current) !== environment(candidate)) throw new UserError('panelOnlyEnvironment')
+      if (JSON.stringify(current.executor.compactionModel) !== JSON.stringify(candidate.executor.compactionModel))
+        throw new UserError('panelOnlyCompactionModel')
+    },
   },
   source: {
     parse: (value, sources, id) => sources.validate(id, z.object({ enabled: z.boolean(), config: z.unknown() }).parse(value)),
@@ -69,6 +84,7 @@ export interface SettingsHost {
   readonly sourceHost: SourceHost
   /** Setup state, account/command checks, and restart trigger when setup-read fields change. */
   readonly setup: Pick<Setup, 'configured' | 'checkAccounts' | 'blockCommands' | 'restart'>
+  readonly memory: Pick<HindsightMemory, 'checkRepository'>
   /** Triggers an immediate pass so work newly allowed by a settings save runs right away. */
   requestPass(): void
 }
@@ -157,17 +173,34 @@ export class Settings {
     const parsed = rules.parse(value, sources, id)
     const current = store.settings()
     const candidate = rules.merge(current, parsed, id)
+    rules.guard?.(current, candidate, origin)
     const model = block === 'eval' ? candidate.eval.model : block === 'executor' ? candidate.executor.model : null
     const previous = block === 'eval' ? current.eval.model : block === 'executor' ? current.executor.model : null
     if (model && JSON.stringify(model) !== JSON.stringify(previous)) {
       try { await resolveRoleModel(this.host.context, model) }
       catch (error) { throw new UserError('modelUnavailable', { block, error: error instanceof Error ? error.message : String(error) }) }
     }
-    rules.guard?.(current, candidate, origin)
-    if (setupChanged(current, candidate)) await this.host.setup.checkAccounts(block, candidate)
+    const compactionModel = candidate.executor.compactionModel
+    if (block === 'executor' && compactionModel && JSON.stringify(compactionModel) !== JSON.stringify(current.executor.compactionModel)) {
+      try { await resolveRoleModel(this.host.context, compactionModel) }
+      catch (error) { throw new UserError('compactionModelUnavailable', { error: error instanceof Error ? error.message : String(error) }) }
+    }
+    const checking = setupChanged(current, candidate)
+    const beforeProject = project(current), afterProject = project(candidate)
+    const switching = beforeProject !== undefined && afterProject !== undefined && beforeProject !== afterProject
+    if (switching && candidate.executor.prepare.trim() && candidate.executor.prepare === current.executor.prepare)
+      throw new SetupError('prepareProjectChanged')
+    const checked = checking ? await this.host.setup.checkAccounts(block, candidate) : undefined
+    if (switching) {
+      const target = checked?.provider === selectRepositoryProvider(candidate).provider ? checked : await this.host.setup.checkAccounts('executor', candidate)
+      if (!target) throw new SetupError('repositoryChoiceUnset')
+      await this.host.memory.checkRepository(target.webUrl)
+    }
     if (stale()) throw new SettingsConflict('Settings changed during the checks. Reload before saving.')
     // Re-read current settings after async checks in case unrelated blocks were saved concurrently.
     const old = store.settings()
+    if (checking && (setupChanged(current, old) || environment(current) !== environment(old)))
+      throw new SettingsConflict('Project configuration changed during the checks. Reload before saving.')
     const settings = rules.merge(old, parsed, id)
     if (JSON.stringify(SettingsSchema.parse(settings)) === JSON.stringify(old)) {
       const delivery = await sessions.delivery(`settings:${block}`)
