@@ -181,6 +181,32 @@ it('refuses a project switch that would reuse an unchanged custom prepare comman
   expect(h.subprocess.spawn.mock.calls.length).toBe(spawnCount)
 })
 
+it('requires clearing the old prepare command when resolving an ambiguous automatic repository selection', async () => {
+  h = await startRuntime()
+  const { settings, store } = h.runtime
+  const current = store.settings()
+  store.saveSettings({
+    ...current, executor: { ...current.executor, repositoryProvider: 'auto', prepare: 'echo old-project-guard' },
+    sources: { ...current.sources, gitlab: { enabled: true,
+      config: { host: 'https://gitlab.example.invalid', repository: 'team/other', cli: 'glab' } } },
+  })
+  vi.spyOn(Setup.prototype, 'checkAccounts').mockResolvedValue({
+    ...h.runtime.deployment, provider: 'gitlab', origin: 'https://gitlab.example.invalid',
+    repository: 'team/other', webUrl: 'https://gitlab.example.invalid/team/other',
+  })
+  const restart = vi.spyOn(Setup.prototype, 'restart').mockImplementation(() => {})
+  const executor = settings.block('executor')
+  const chooseGitLab = (prepare: string) => h!.api('PUT', 'settings/executor', {
+    value: { ...store.settings().executor, repositoryProvider: 'gitlab', prepare }, revision: executor.revision,
+  })
+  expect(await chooseGitLab('echo old-project-guard'))
+    .toMatchObject({ status: 400, body: { setup: { code: 'prepareProjectChanged' } } })
+  expect(store.settings().executor.repositoryProvider).toBe('auto')
+  expect(restart).not.toHaveBeenCalled()
+  expect(await chooseGitLab('')).toMatchObject({ status: 200, body: { restarting: true } })
+  expect(store.settings().executor.repositoryProvider).toBe('gitlab')
+})
+
 it.each(['repository', 'permissions'] as const)('refuses a project switch with an invalid memory %s binding before saving or restarting', async boundary => {
   h = await startRuntime()
   const { settings, store } = h.runtime

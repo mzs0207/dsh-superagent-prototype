@@ -218,6 +218,7 @@ When switching projects, wait for idle workers and update the hosting Source, th
 
 Project-switch saves now run a preflight before persisting or restarting. An unchanged nonempty `executor.prepare` is refused: while processing is paused, clear it, switch the hosting Source or provider, then restore a reviewed command for the new project before resuming. The preflight does not execute or parse arbitrary shell commands, so a disposable checkout remains necessary. If `hindsight.json` exists, its format, private permissions and repository binding are re-read against the target's resolved web URL; invalid configuration blocks the save. Review `projectTag` explicitly too; it cannot be inferred from a repository URL. Concurrent account/prepare edits require reloading before saving. Failed checks leave settings, Tickets and pending exports unchanged.
 
+The same preflight applies when selecting a provider after Automatic could not choose one, including when both hosting Sources are configured.
 
 ## Install
 

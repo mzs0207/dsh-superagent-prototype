@@ -187,7 +187,8 @@ export class Settings {
     }
     const checking = setupChanged(current, candidate)
     const beforeProject = project(current), afterProject = project(candidate)
-    const switching = beforeProject !== undefined && afterProject !== undefined && beforeProject !== afterProject
+    // Resolving an unset or ambiguous repository must not inherit an unverified prepare command.
+    const switching = afterProject !== undefined && beforeProject !== afterProject
     if (switching && candidate.executor.prepare.trim() && candidate.executor.prepare === current.executor.prepare)
       throw new SetupError('prepareProjectChanged')
     const checked = checking ? await this.host.setup.checkAccounts(block, candidate) : undefined
