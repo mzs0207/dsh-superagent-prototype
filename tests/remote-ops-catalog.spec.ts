@@ -32,6 +32,32 @@ it('projects are linked by stable IDs; common metadata is visible but credential
   await expect(remote.check({ environment: prod, resource: database, action: 'database' }, new AbortController().signal, false)).rejects.toMatchObject({ code: 'resource_not_found' })
 })
 
+it('keeps incoming relationship references when moving a project, but does not start scans on a copy', async () => {
+  const { store } = await setup()
+  let view = await store.createEnvironment({ revision: 0, name: 'Services' })
+  const source = view.environments[0]!.id, destination = view.environments.find(env => env.shared)!.id
+  const project = { type: 'project', localPath: '/work/repo', repository: 'https://example.invalid/repo.git' } as const
+  view = await store.saveCatalog(source, undefined, { ...project, revision: view.revision, name: 'Service',
+    model: { provider: 'fixture', model: 'fixture' } })
+  const service = view.environments[0]!.catalog![0]!.id
+  view = await store.saveCatalog(source, undefined, { ...project, revision: view.revision, name: 'Peer' })
+  const peer = view.environments[0]!.catalog![1]!.id
+  view = await store.saveCatalog(source, undefined, { revision: view.revision, type: 'project-relationship', name: 'Uses',
+    source: peer, target: service, description: 'Shares schema' })
+  view = await store.transferRecord(source, service, { revision: view.revision, destination, mode: 'copy' })
+  const duplicate = view.environments.find(env => env.shared)!.catalog![0]!
+  expect(duplicate.id).not.toBe(service)
+  expect(duplicate).toMatchObject({ type: 'project', name: 'Service', scanEnabled: false })
+  expect(duplicate).not.toHaveProperty('model')
+  view = await store.transferRecord(source, service, { revision: view.revision, destination, mode: 'move' })
+  expect(view.environments.find(env => env.id === source)!.catalog).toMatchObject([
+    { id: peer }, { type: 'project-relationship', source: peer, target: service },
+  ])
+  expect(view.environments.find(env => env.shared)!.catalog).toMatchObject([
+    { id: duplicate.id, scanEnabled: false }, { id: service, scanEnabled: true, model: { provider: 'fixture', model: 'fixture' } },
+  ])
+})
+
 it('transfers references and metadata without carrying credentials, fingerprint trust or model consent', async () => {
   const { store: source } = await setup(), { store: target } = await setup()
   let view = await source.view()

@@ -1,10 +1,10 @@
-/** Native SSH password transport: credentials never enter argv, environment, files or tool arguments. */
+/** Native SSH transport: credentials never enter argv, environment, files or tool arguments. */
 import { createHash, timingSafeEqual } from 'node:crypto'
 import { Client, type ConnectConfig, type ClientChannel } from 'ssh2'
 import type { ProcessLimits, ProcessResult } from './runner.ts'
-import { FingerprintSchema, RemoteManagementError } from './managed-types.ts'
+import { FingerprintSchema, RemoteManagementError, type SshSecret } from './managed-types.ts'
 
-export interface PasswordConnection { host: string; port: number; username: string; password: string; fingerprint: string }
+export type SshConnection = ProbeAddress & { username: string; fingerprint: string } & SshSecret
 export interface ProbeAddress { host: string; port: number }
 export const hostFingerprint = (key: Buffer): string => `SHA256:${createHash('sha256').update(key).digest('base64').replace(/=+$/, '')}`
 const sameFingerprint = (a: string, b: string): boolean => {
@@ -14,7 +14,7 @@ const sameFingerprint = (a: string, b: string): boolean => {
 const baseConfig = (address: ProbeAddress, limits: ProcessLimits): ConnectConfig => ({ host: address.host, port: address.port,
   readyTimeout: Math.min(15000, limits.timeoutMs), keepaliveInterval: 5000, keepaliveCountMax: 2, tryKeyboard: false })
 
-/** Performs only the key exchange, rejecting the key before any password/other authentication is sent. */
+/** Performs only the key exchange, rejecting the key before any authentication is sent. */
 export async function probeHostKey(address: ProbeAddress, signal: AbortSignal, limits: ProcessLimits): Promise<string> {
   signal.throwIfAborted()
   return new Promise((resolve, reject) => {
@@ -43,10 +43,11 @@ export async function probeHostKey(address: ProbeAddress, signal: AbortSignal, l
 }
 
 /** Connect and optionally execute ONE internally planned read-only command; undefined means authentication test only. */
-export async function runPasswordSsh(connection: PasswordConnection, command: string | undefined,
+export async function runManagedSsh(connection: SshConnection, command: string | undefined,
   signal: AbortSignal, limits: ProcessLimits): Promise<ProcessResult> {
   signal.throwIfAborted()
   FingerprintSchema.parse(connection.fingerprint)
+  const method = connection.privateKey === undefined ? 'password' : 'publickey'
   const started = Date.now()
   return new Promise(resolve => {
     const client = new Client()
@@ -72,7 +73,8 @@ export async function runPasswordSsh(connection: PasswordConnection, command: st
       if (keep < chunk.length) truncated = true
     }
     client.on('error', (failure: Error & { level?: string }) => {
-      error ??= failure.level === 'client-authentication' ? 'SSH password authentication failed' : 'SSH connection failed; check address, port and network access'
+      error ??= failure.level === 'client-authentication' ? `SSH ${method === 'password' ? 'password' : 'private key'} authentication failed`
+        : 'SSH connection failed; check address, port and network access'
       destroy()
     })
     client.on('close', finish)
@@ -94,8 +96,9 @@ export async function runPasswordSsh(connection: PasswordConnection, command: st
     })
     signal.addEventListener('abort', abort, { once: true })
     try {
-      client.connect({ ...baseConfig(connection, limits), username: connection.username, password: connection.password,
-        authHandler: ['password'], hostVerifier: (key: Buffer) => {
+      client.connect({ ...baseConfig(connection, limits), username: connection.username,
+        password: connection.password, privateKey: connection.privateKey, passphrase: connection.passphrase || undefined,
+        authHandler: [method], hostVerifier: (key: Buffer) => {
           const matches = sameFingerprint(hostFingerprint(key), connection.fingerprint)
           if (!matches) error = 'SSH host key changed or is not trusted; verify the fingerprint in the management page'
           return matches

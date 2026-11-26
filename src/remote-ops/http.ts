@@ -6,7 +6,7 @@ import { json, match, readBody, RouteError, sameOrigin } from '../infra/manageme
 import { REMOTE_API, REMOTE_PAGE, type RemoteApi, type RemoteParams } from './api.ts'
 import type { ManagedRemoteOps } from './managed.ts'
 import { DeleteSchema, EnvironmentWriteSchema, HostWriteSchema, RemoteManagementError, ResourceActionSchema, ResourceWriteSchema,
-  RevisionSchema } from './managed-types.ts'
+  RecordTransferSchema, RevisionSchema } from './managed-types.ts'
 import { CatalogWriteSchema } from './catalog-types.ts'
 import { MAX_IMPORT_BYTES } from './portable.ts'
 
@@ -66,6 +66,15 @@ export function registerRemoteHttp(web: Context['webServer'], remote: ManagedRem
       remote.projects.queue(params.resource)
       return updated
     },
+    'POST remote/environments/:environment/records/:resource/transfer': async ({ params, body }) => {
+      const input = RecordTransferSchema.parse(await body())
+      const view = await store.transferRecord(params.environment, params.resource, input)
+      if (input.mode === 'move') {
+        const destination = view.environments.find(env => env.id === input.destination)
+        if (destination?.catalog?.some(item => item.id === params.resource && item.type === 'project')) remote.projects.queue(params.resource)
+      }
+      return view
+    },
     'GET remote/environments/:environment/projects/:resource/summary': ({ params }) => remote.projects.view(params.environment, params.resource),
     'POST remote/environments/:environment/projects/:resource/summary': async ({ params }) => {
       await remote.projects.run(params.environment, params.resource)
@@ -74,8 +83,9 @@ export function registerRemoteHttp(web: Context['webServer'], remote: ManagedRem
     'GET remote/export': () => store.exportCatalog(),
     'POST remote/import/preview': async ({ body }) => store.previewImport(z.object({ bundle: z.unknown() }).strict().parse(await body()).bundle),
     'POST remote/import': async ({ body }) => {
-      const { revision, bundle, passwords } = z.object({ revision: RevisionSchema, bundle: z.unknown(), passwords: z.unknown() }).strict().parse(await body())
-      return store.importCatalog(bundle, revision, passwords)
+      const { revision, bundle, passwords, privateKeys } = z.object({ revision: RevisionSchema, bundle: z.unknown(),
+        passwords: z.unknown(), privateKeys: z.unknown().optional() }).strict().parse(await body())
+      return store.importCatalog(bundle, revision, passwords, privateKeys)
     },
   }
   return web.register({ kind: 'prefix', path: REMOTE_PAGE, handler: async (req, res) => {

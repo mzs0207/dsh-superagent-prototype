@@ -2,31 +2,36 @@ import { createCipheriv, createDecipheriv, randomBytes, randomUUID } from 'node:
 import { constants } from 'node:fs'
 import { link, lstat, mkdir, open, rename, unlink } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
+import ssh2 from 'ssh2'
 import { z } from 'zod'
 import { normalizeName } from './inventory.ts'
 import {
-  EnvironmentWriteSchema, FingerprintSchema, HostWriteSchema, PostgresResourceSchema, RemoteManagementError, ResourceWriteSchema,
-  RevisionSchema, WebsiteResourceSchema, type EnvironmentWrite, type HostCredentials, type HostWrite, type ManagedHost,
-  type ManagedResource, type ManagedView, type ResourceWrite,
+  EnvironmentWriteSchema, FingerprintSchema, HostAuthSchema, HostWriteSchema, PostgresResourceSchema,
+  PrivateKeySecretSchema, RemoteManagementError, ResourceWriteSchema, RevisionSchema, WebsiteResourceSchema, type EnvironmentWrite,
+  RecordTransferSchema, type RecordTransfer,
+  type HostCredentials, type HostWrite, type ManagedHost, type ManagedResource, type ManagedView, type PrivateKeySecret, type ResourceWrite,
 } from './managed-types.ts'
+import { MAX_PRIVATE_KEY_LENGTH } from './api.ts'
 import { CatalogWriteSchema, SHARED_ENVIRONMENT, StoredCatalogSchema, type CatalogResource, type CatalogWrite,
   type StoredCatalog, type StoredProject } from './catalog-types.ts'
 import { repositoryMarkdown, RepositorySnapshotSchema, type RepositorySnapshot } from './repository.ts'
-import { ImportPasswordsSchema, planImport, PortableBundleSchema, type PortableBundle, type PortableEnvironment } from './portable.ts'
+import { ImportPasswordsSchema, ImportPrivateKeysSchema, planImport, PortableBundleSchema,
+  type ImportPreview, type PortableBundle, type PortableEnvironment } from './portable.ts'
 
 const MAX_STATE_BYTES = 16 * 1024 * 1024
+const MAX_RECORDS_PER_TYPE = 1000
 const PERMISSION_BITS = 0o7777
 const PasswordSchema = HostWriteSchema.shape.password.unwrap().refine(value => value.length > 0)
-const MAX_PASSWORD_JSON_BYTES = 4096 * 6 + 2
-const Base64Schema = z.string().min(1).max(4 * Math.ceil(MAX_PASSWORD_JSON_BYTES / 3))
+const MAX_CREDENTIAL_JSON_BYTES = (MAX_PRIVATE_KEY_LENGTH + 4096) * 6 + 64
+const Base64Schema = z.string().min(1).max(4 * Math.ceil(MAX_CREDENTIAL_JSON_BYTES / 3))
   .refine(value => Buffer.from(value, 'base64').toString('base64') === value)
 const SecretSchema = z.object({
   iv: Base64Schema.refine(value => Buffer.from(value, 'base64').length === 12),
   tag: Base64Schema.refine(value => Buffer.from(value, 'base64').length === 16),
-  ciphertext: Base64Schema.refine(value => Buffer.from(value, 'base64').length <= MAX_PASSWORD_JSON_BYTES),
+  ciphertext: Base64Schema.refine(value => Buffer.from(value, 'base64').length <= MAX_CREDENTIAL_JSON_BYTES),
 }).strict()
-const StoredHostSchema = HostWriteSchema.omit({ revision: true, password: true }).extend({
-  id: z.string().uuid(), auth: z.literal('password'), hostKeyFingerprint: FingerprintSchema.nullable(), secret: SecretSchema,
+const StoredHostSchema = HostWriteSchema.omit({ revision: true, password: true, privateKey: true, passphrase: true }).extend({
+  id: z.string().uuid(), auth: HostAuthSchema, hostKeyFingerprint: FingerprintSchema.nullable(), secret: SecretSchema,
 }).strict()
 const resourceSecret = { id: z.uuid(), secret: SecretSchema }
 const StoredResourceSchema = z.union([
@@ -36,9 +41,9 @@ const StoredResourceSchema = z.union([
     webPaths: z.unknown().optional() }).transform(({ role: _, apiPaths: _api, webPaths: _web, ...resource }) => resource),
 ])
 const StoredEnvironmentSchema = EnvironmentWriteSchema.omit({ revision: true }).extend({
-  id: z.string().uuid(), hosts: z.array(StoredHostSchema).max(1000),
-  resources: z.array(StoredResourceSchema).max(1000).default([]),
-  catalog: z.array(StoredCatalogSchema).max(1000).default([]),
+  id: z.string().uuid(), hosts: z.array(StoredHostSchema).max(MAX_RECORDS_PER_TYPE),
+  resources: z.array(StoredResourceSchema).max(MAX_RECORDS_PER_TYPE).default([]),
+  catalog: z.array(StoredCatalogSchema).max(MAX_RECORDS_PER_TYPE).default([]),
 }).strict()
 const StateSchema = z.object({
   version: z.union([z.literal(1), z.literal(2), z.literal(3)]), revision: RevisionSchema, environments: z.array(StoredEnvironmentSchema).max(1001),
@@ -70,7 +75,7 @@ function findHost(state: State, environmentId: string, hostId: string): StoredHo
   if (!host) throw new RemoteManagementError(404, 'host_not_found', 'Remote host was not found.')
   return host
 }
-function assertCollections({ environments }: { environments: PortableEnvironment[] }): void {
+function assertCollections({ environments }: { environments: (Omit<PortableEnvironment, 'hosts'> & { hosts: Pick<StoredHost, 'id' | 'projects'>[] })[] }): void {
   const environmentNames = new Set<string>()
   const resourceIds = new Set<string>()
   const projectIds = new Set<string>()
@@ -110,7 +115,7 @@ function assertCollections({ environments }: { environments: PortableEnvironment
 }
 function hostView(host: StoredHost): ManagedHost {
   return { id: host.id, type: 'linux-host', notes: host.notes, name: host.name, host: host.host, port: host.port, username: host.username,
-    auth: 'password', hasPassword: true, hostKeyFingerprint: host.hostKeyFingerprint, projects: structuredClone(host.projects) }
+    auth: host.auth, hasPassword: host.auth === 'password', hostKeyFingerprint: host.hostKeyFingerprint, projects: structuredClone(host.projects) }
 }
 function resourceView({ secret: _, ...resource }: StoredResource): ManagedResource {
   return { ...resource, hasPassword: true }
@@ -132,7 +137,8 @@ function ensureShared(state: State): void {
 function portableView(state: State): PortableBundle {
   return { format: 'dsh-environment-resources', version: 1, environments: state.environments.map(({ hosts, resources, catalog, ...environment }) => ({
     ...environment,
-    hosts: hosts.map(({ secret: _, auth: _auth, hostKeyFingerprint: _trust, ...host }) => host),
+    hosts: hosts.map(({ secret: _, auth, hostKeyFingerprint: _trust, ...host }) =>
+      auth === 'private-key' ? { ...host, auth } : host),
     resources: resources.map(({ secret: _, allowWorker: _worker, ...resource }) => {
       if (resource.type === 'postgresql') return resource
       const { communityTermsAccepted: _terms, ...fields } = resource
@@ -165,28 +171,52 @@ function viewOf(state: State): ManagedView {
     ...(environment.catalog.length ? { catalog: environment.catalog.map(catalogView) } : {}),
   })) }
 }
-function encrypt(key: Buffer, hostId: string, password: string): Secret {
+function encrypt(key: Buffer, hostId: string, secret: string | PrivateKeySecret): Secret {
   const iv = randomBytes(12)
   const cipher = createCipheriv('aes-256-gcm', key, iv)
   cipher.setAAD(Buffer.from(hostId, 'utf8'))
   // JSON preserves even opaque passwords containing unpaired UTF-16 surrogates.
-  const plaintext = Buffer.from(JSON.stringify(password), 'utf8')
+  const plaintext = Buffer.from(JSON.stringify(secret), 'utf8')
   try {
     const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()])
     return { iv: iv.toString('base64'), tag: cipher.getAuthTag().toString('base64'), ciphertext: ciphertext.toString('base64') }
   } finally { plaintext.fill(0) }
 }
-function decrypt(key: Buffer, host: { id: string; secret: Secret }): string {
+function decrypt<T>(key: Buffer, host: { id: string; secret: Secret }, schema: z.ZodType<T>): T {
   const decipher = createDecipheriv('aes-256-gcm', key, Buffer.from(host.secret.iv, 'base64'))
   decipher.setAAD(Buffer.from(host.id, 'utf8'))
   decipher.setAuthTag(Buffer.from(host.secret.tag, 'base64'))
   const plaintext = Buffer.concat([decipher.update(Buffer.from(host.secret.ciphertext, 'base64')), decipher.final()])
   try {
     const decoded: unknown = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(plaintext))
-    const parsed = PasswordSchema.safeParse(decoded)
+    const parsed = schema.safeParse(decoded)
     if (!parsed.success) throw unavailable()
     return parsed.data
   } finally { plaintext.fill(0) }
+}
+
+function decryptHost(key: Buffer, host: StoredHost) {
+  return host.auth === 'password' ? decrypt(key, host, PasswordSchema) : decrypt(key, host, PrivateKeySecretSchema)
+}
+
+function validatePrivateKey(secret: PrivateKeySecret): PrivateKeySecret {
+  try {
+    const key = ssh2.utils.parseKey(secret.privateKey, secret.passphrase || undefined)
+    if (!(key instanceof Error) && !Array.isArray(key) && key.isPrivateKey()) return secret
+  } catch { /* SSH parser errors may contain credential details. */ }
+  throw new RemoteManagementError(400, 'invalid_private_key', 'Invalid SSH private key or passphrase.')
+}
+
+function submittedHostSecret(auth: ManagedHost['auth'], { password, privateKey, passphrase }: HostWrite, required: boolean) {
+  if (auth === 'password') {
+    if (privateKey || passphrase) throw invalid()
+    if (!password && required) throw new RemoteManagementError(400, 'password_required', 'Enter an SSH password.')
+    return password || undefined
+  }
+  if (password) throw invalid()
+  if (privateKey) return validatePrivateKey({ privateKey, passphrase })
+  if (required || passphrase) throw new RemoteManagementError(400, 'private_key_required', 'Enter an SSH private key.')
+  return undefined
 }
 function isMissing(error: unknown): boolean {
   return typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT'
@@ -240,10 +270,10 @@ export class ManagedStore {
       const parsed = parseInput(HostWriteSchema, input)
       assertRevision(state, parsed.revision)
       const environment = findEnvironment(state, environmentId)
-      if (!parsed.password) throw new RemoteManagementError(400, 'password_required', 'A password is required when creating a host.')
-      const { revision: _, password, ...fields } = parsed
+      const { revision: _, auth = 'password', password, privateKey, passphrase, ...fields } = parsed
+      const secret = submittedHostSecret(auth, parsed, true)!
       const id = randomUUID()
-      environment.hosts.push({ ...fields, id, auth: 'password', hostKeyFingerprint: null, secret: encrypt(key, id, password) })
+      environment.hosts.push({ ...fields, id, auth, hostKeyFingerprint: null, secret: encrypt(key, id, secret) })
       return this.#commit(state)
     })
   }
@@ -253,11 +283,12 @@ export class ManagedStore {
       const parsed = parseInput(HostWriteSchema, input)
       assertRevision(state, parsed.revision)
       const host = findHost(state, environmentId, hostId)
-      const { revision: _, password, ...fields } = parsed
+      const { revision: _, auth = host.auth, password, privateKey, passphrase, ...fields } = parsed
+      const secret = submittedHostSecret(auth, parsed, auth !== host.auth)
       // Endpoint identity changes require a new independently verified host-key pin.
       if (host.host !== fields.host || host.port !== fields.port) host.hostKeyFingerprint = null
-      Object.assign(host, fields)
-      if (password !== undefined && password !== '') host.secret = encrypt(key, host.id, password)
+      Object.assign(host, fields, { auth })
+      if (secret !== undefined) host.secret = encrypt(key, host.id, secret)
       return this.#commit(state)
     })
   }
@@ -345,6 +376,40 @@ export class ManagedStore {
     })
   }
 
+  transferRecord(sourceId: string, recordId: string, input: RecordTransfer): Promise<ManagedView> {
+    return this.#execute(async (state, key) => {
+      const { revision, destination, mode } = parseInput(RecordTransferSchema, input)
+      assertRevision(state, revision)
+      if (sourceId === destination) throw invalid()
+      const source = findEnvironment(state, sourceId), target = findEnvironment(state, destination)
+      const copy = mode === 'copy'
+      const moveOrCopy = <T extends { id: string }>(from: T[], to: T[], prepare: (record: T, id: string) => T) => {
+        const index = from.findIndex(item => item.id === recordId)
+        if (index === -1) return false
+        if (to.length >= MAX_RECORDS_PER_TYPE) {
+          throw new RemoteManagementError(400, 'environment_full', 'The destination environment has reached its record limit.')
+        }
+        to.push(prepare(from[index]!, copy ? randomUUID() : recordId))
+        if (!copy) from.splice(index, 1)
+        return true
+      }
+      const transferred = moveOrCopy(source.hosts, target.hosts, (host, id) => copy
+        ? { ...host, id, secret: encrypt(key, id, decryptHost(key, host)) } : host)
+        || moveOrCopy(source.resources, target.resources, (resource, id) => ({
+          ...resource, id, allowWorker: false,
+          secret: copy ? encrypt(key, id, decrypt(key, resource, PasswordSchema)) : resource.secret,
+        }))
+        || moveOrCopy(source.catalog, target.catalog, (record, id) => {
+          if (!copy) return record
+          if (record.type !== 'project') return { ...record, id }
+          const { model: _, ...project } = record
+          return { ...project, id, scanEnabled: false, refreshRequired: true }
+        })
+      if (!transferred) throw new RemoteManagementError(404, 'resource_not_found', 'Environment resource was not found.')
+      return this.#commit(state)
+    })
+  }
+
   scanTargets() {
     return this.#execute(async state => state.environments.flatMap(env => env.catalog.flatMap(record =>
       record.type === 'project' && record.scanEnabled ? [{ environment: env.id, project: record }] : [])))
@@ -378,7 +443,7 @@ export class ManagedStore {
     return this.#execute(async state => portableView(state))
   }
 
-  previewImport(input: unknown) {
+  previewImport(input: unknown): Promise<ImportPreview> {
     return this.#execute(async state => {
       const plan = planImport(portableView(state), parseInput(PortableBundleSchema, input), state.revision)
       assertCollections(plan.bundle)
@@ -386,16 +451,22 @@ export class ManagedStore {
     })
   }
 
-  importCatalog(input: unknown, revision: number, passwords: unknown): Promise<ManagedView> {
+  importCatalog(input: unknown, revision: number, passwords: unknown, privateKeys: unknown = {}): Promise<ManagedView> {
     return this.#execute(async (state, key) => {
       assertRevision(state, parseInput(RevisionSchema, revision))
       const plan = planImport(portableView(state), parseInput(PortableBundleSchema, input), state.revision)
       assertCollections(plan.bundle)
       const secrets = parseInput(ImportPasswordsSchema, passwords)
       if (plan.preview.passwords.some(item => !secrets[item.id])) {
-        throw new RemoteManagementError(400, 'password_required', 'Enter a password for every newly imported connection.')
+        throw new RemoteManagementError(400, 'password_required', 'Enter a password for every newly imported password-based connection.')
       }
       if (Object.keys(secrets).length !== plan.preview.passwords.length) throw invalid()
+      const keys = parseInput(ImportPrivateKeysSchema, privateKeys)
+      const keyRequests = plan.preview.privateKeys ?? []
+      if (keyRequests.some(item => !keys[item.id])) {
+        throw new RemoteManagementError(400, 'private_key_required', 'Enter a private key for every newly imported key-based host.')
+      }
+      if (Object.keys(keys).length !== keyRequests.length) throw invalid()
       if (!plan.preview.added) return viewOf(state)
       const environments = new Map(state.environments.map(environment => [environment.id, environment]))
       state.environments = plan.bundle.environments.map(({ hosts, resources, catalog, ...env }) => {
@@ -405,8 +476,8 @@ export class ManagedStore {
         const oldCatalog = new Map(existing?.catalog.map(item => [item.id, item]))
         return {
           ...env,
-          hosts: hosts.map(host => oldHosts.get(host.id) ?? { ...host, auth: 'password', hostKeyFingerprint: null,
-            secret: encrypt(key, host.id, secrets[host.id]!) }),
+          hosts: hosts.map(host => oldHosts.get(host.id) ?? { ...host, auth: host.auth ?? 'password', hostKeyFingerprint: null,
+            secret: encrypt(key, host.id, host.auth === 'private-key' ? validatePrivateKey(keys[host.id]!) : secrets[host.id]!) }),
           resources: resources.map(resource => oldResources.get(resource.id) ?? { ...resource, allowWorker: false,
             secret: encrypt(key, resource.id, secrets[resource.id]!) }),
           catalog: catalog.map(record => oldCatalog.get(record.id) ?? (record.type === 'project'
@@ -426,7 +497,7 @@ export class ManagedStore {
       if (environment.production || (worker && !resource.allowWorker)) {
         throw new RemoteManagementError(400, 'resource_not_allowed', 'Credential use is not enabled for this environment and session.')
       }
-      return { resource: resourceView(resource), password: decrypt(key, resource) }
+      return { resource: resourceView(resource), password: decrypt(key, resource, PasswordSchema) }
     })
   }
 
@@ -445,7 +516,8 @@ export class ManagedStore {
     return this.#execute(async (state, key) => {
       assertRevision(state, parseInput(RevisionSchema, expectedRevision))
       const host = findHost(state, environmentId, hostId)
-      return { revision: state.revision, host: hostView(host), password: decrypt(key, host) }
+      const secret = decryptHost(key, host)
+      return { revision: state.revision, host: hostView(host), ...(typeof secret === 'string' ? { password: secret } : secret) }
     })
   }
 
@@ -511,8 +583,8 @@ export class ManagedStore {
         assertCollections(state)
         // Authenticate all stored secrets before exposing any supposedly healthy snapshot.
         for (const environment of state.environments) {
-          for (const host of environment.hosts) decrypt(key, host)
-          for (const resource of environment.resources) decrypt(key, resource)
+          for (const host of environment.hosts) decryptHost(key, host)
+          for (const resource of environment.resources) decrypt(key, resource, PasswordSchema)
         }
       } catch { throw unavailable() }
       return { state, key }

@@ -4,15 +4,15 @@ import { ManagedStore } from './managed-store.ts'
 import { InventorySchema, normalizeName, type Inventory } from './inventory.ts'
 import { diagnosticCommand, InspectSchema, planInspection } from './commands.ts'
 import { RemoteOps, type ProcessLimits, type ProcessResult } from './runner.ts'
-import { probeHostKey, runPasswordSsh, type PasswordConnection, type ProbeAddress } from './password-ssh.ts'
+import { probeHostKey, runManagedSsh, type SshConnection, type ProbeAddress } from './managed-ssh.ts'
 import { checkResource, isWebsiteReadPath, openWebsite, type WebsiteConnection, type WebsiteReadResult } from './resource-checks.ts'
 import { RemoteManagementError, ProbeSchema, TrustSchema, ResourceActionSchema, ResourceLoginSchema, ResourceSearchSchema,
   ResourceSessionReadSchema, type ConnectionTest, type HostKeyProbe, type ManagedEnvironment, type ManagedHost, type ManagedView } from './managed-types.ts'
 import { ProjectRefresh, type SummaryRuntime } from './project-refresh.ts'
 
-interface PasswordTransport {
+interface ManagedSshTransport {
   probe(address: ProbeAddress, signal: AbortSignal, limits: ProcessLimits): Promise<string>
-  run(connection: PasswordConnection, command: string | undefined, signal: AbortSignal, limits: ProcessLimits): Promise<ProcessResult>
+  run(connection: SshConnection, command: string | undefined, signal: AbortSignal, limits: ProcessLimits): Promise<ProcessResult>
 }
 interface Challenge { environment: string; host: string; address: string; port: number; revision: number; fingerprint: string; expires: number }
 const LIMITS = { timeoutMs: 30000, maxOutputBytes: 65536 }
@@ -45,7 +45,7 @@ export class ManagedRemoteOps {
   private readonly closingLogins = new Set<Promise<void>>()
   private readonly stopped = new AbortController()
   constructor(directory: string,
-    private readonly ssh: PasswordTransport = { probe: probeHostKey, run: runPasswordSsh },
+    private readonly ssh: ManagedSshTransport = { probe: probeHostKey, run: runManagedSsh },
     private readonly browserExecutable = '', llm: () => SummaryRuntime | undefined = () => undefined) {
     this.store = new ManagedStore(directory)
     this.projects = new ProjectRefresh(this.store, llm)
@@ -87,14 +87,14 @@ export class ManagedRemoteOps {
   async test(environment: string, host: string, input: unknown, signal: AbortSignal): Promise<ConnectionTest> {
     const { revision } = ProbeSchema.parse(input), linked = this.signal(signal)
     const target = await this.target(environment, host, revision)
-    if (!target.hostKeyFingerprint) throw new RemoteManagementError(400, 'remote/untrusted', 'Verify and trust the SSH host fingerprint before sending a password')
+    if (!target.hostKeyFingerprint) throw new RemoteManagementError(400, 'remote/untrusted', 'Verify and trust the SSH host fingerprint before authenticating')
     const result = await this.runner.withSlot(linked, async active => {
-      const credentials = await this.store.credentials(environment, host, revision)
-      if (!credentials.host.hostKeyFingerprint) throw new RemoteManagementError(400, 'remote/untrusted', 'SSH host fingerprint is not trusted')
-      return this.ssh.run({ host: credentials.host.host, port: credentials.host.port, username: credentials.host.username,
-        password: credentials.password, fingerprint: credentials.host.hostKeyFingerprint }, undefined, active, LIMITS)
+      const { host: target, revision: _, ...secret } = await this.store.credentials(environment, host, revision)
+      if (!target.hostKeyFingerprint) throw new RemoteManagementError(400, 'remote/untrusted', 'SSH host fingerprint is not trusted')
+      return this.ssh.run({ host: target.host, port: target.port, username: target.username,
+        ...secret, fingerprint: target.hostKeyFingerprint }, undefined, active, LIMITS)
     })
-    return { ok: result.ok, message: result.ok ? 'SSH password authentication succeeded; no remote command was executed'
+    return { ok: result.ok, message: result.ok ? 'SSH authentication succeeded; no remote command was executed'
       : result.error ?? 'SSH connection test failed', durationMs: result.durationMs }
   }
   async inventory() {
@@ -248,15 +248,15 @@ export class ManagedRemoteOps {
     // Check every selected trust state and command before starting any connection.
     for (const target of targets) {
       const host = environment.hosts.find(item => item.id === target.server.id)!
-      if (!host.hostKeyFingerprint || !host.hasPassword) throw new RemoteManagementError(400, 'remote/untrusted', 'Every selected host needs a password and a verified SSH fingerprint')
+      if (!host.hostKeyFingerprint) throw new RemoteManagementError(400, 'remote/untrusted', 'Every selected host needs a verified SSH fingerprint')
       diagnosticCommand(target, request)
     }
     return this.runner.inspectInventory(request, inventory, linked, async (target, planned, active, limits) => {
-      const credentials = await this.store.credentials(target.environment.id, target.server.id, view.revision)
-      const fingerprint = credentials.host.hostKeyFingerprint
+      const { host, revision: _, ...secret } = await this.store.credentials(target.environment.id, target.server.id, view.revision)
+      const fingerprint = host.hostKeyFingerprint
       if (!fingerprint) throw new RemoteManagementError(400, 'remote/untrusted', 'SSH host fingerprint is not trusted')
-      return this.ssh.run({ host: credentials.host.host, port: credentials.host.port, username: credentials.host.username,
-        password: credentials.password, fingerprint }, diagnosticCommand(target, planned), active, limits)
+      return this.ssh.run({ host: host.host, port: host.port, username: host.username,
+        ...secret, fingerprint }, diagnosticCommand(target, planned), active, limits)
     })
   }
   async stop(): Promise<void> {

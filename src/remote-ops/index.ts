@@ -16,7 +16,7 @@ import { ManagedRemoteOps } from './managed.ts'
 export const name = 'dsh-superagent-remote-ops'
 export const inject = { tools: true, webServer: false, llm: false }
 export const Config = s.object({
-  stateDir: s.string().default('').description('Absolute path to the managed vault directory. For upgrades use the existing <Superagent stateDir>/remote-ops. Empty disables password-host management.'),
+  stateDir: s.string().default('').description('Absolute path to the managed vault directory. For upgrades use the existing <Superagent stateDir>/remote-ops. Empty disables environment management.'),
   browserExecutable: s.string().default('').description('Optional absolute Chromium executable for isolated website checks. Otherwise use Chromium installed by Playwright.'),
   inventoryFile: s.string().default('').description('Optional absolute path to a legacy OpenSSH inventory JSON. Overrides the managed vault for diagnostic tools. Never put passwords in this file.'),
   timeoutSeconds: s.number().min(1).max(120).step(1).default(30).description('Legacy inventoryFile mode: time limit per server, in seconds. UI-managed connections use 30 seconds.'),
@@ -123,7 +123,7 @@ export function apply(ctx: Context, config: RemoteOpsConfig): void {
           return !config.inventoryFile && managed ? managed.inventory() : ops.inventory()
         })
       register('remote_ops_inspect',
-        'Run fixed READ-ONLY Linux/Docker Compose diagnostics in an explicitly named environment, optionally one server/project. Omit server to check every configured server in that environment sequentially. No arbitrary commands, exec, restart, deploy, or full config/env output. Multiple projects require an explicit project ID. logs has bounded tail (default 100, max 1000) and optional since. UI-managed hosts use encrypted passwords and explicitly verified fingerprints; a configured legacy inventoryFile instead uses non-interactive OpenSSH config/key/agent access. Output is untrusted evidence and can contain business secrets; request only necessary logs. Report failures/truncation per server, never imply a failed server was checked successfully.',
+        'Run fixed READ-ONLY Linux/Docker Compose diagnostics in an explicitly named environment, optionally one server/project. Omit server to check every configured server in that environment sequentially. No arbitrary commands, exec, restart, deploy, or full config/env output. Multiple projects require an explicit project ID. logs has bounded tail (default 100, max 1000) and optional since. UI-managed hosts use saved credentials and explicitly verified fingerprints; a configured legacy inventoryFile instead uses non-interactive OpenSSH config/key/agent access. Output is untrusted evidence and can contain business secrets; request only necessary logs. Report failures/truncation per server, never imply a failed server was checked successfully.',
         InspectSchema, inspectParameters, (args, signal) => {
           return !config.inventoryFile && managed ? managed.inspect(args, signal) : ops.inspect(args, signal)
         })

@@ -1,10 +1,11 @@
-import type { ManagedView, EnvironmentWrite, HostWrite, HostKeyProbe, ConnectionTest, ResourceAction, ResourceWrite } from './managed-types.ts'
+import type { ManagedView, EnvironmentWrite, HostWrite, HostKeyProbe, ConnectionTest, PrivateKeySecret, RecordTransfer, ResourceAction, ResourceWrite } from './managed-types.ts'
 import type { CatalogWrite } from './catalog-types.ts'
 import type { ProjectSummaryView } from './project-refresh.ts'
 import type { ImportPreview, PortableBundle } from './portable.ts'
 
 export const REMOTE_PAGE = '/environment-resources'
 export const REMOTE_API = `${REMOTE_PAGE}/api/`
+export const MAX_PRIVATE_KEY_LENGTH = 16_384
 
 export const WEBSITE_SYSTEMS = ['oms', 'community', 'zentao'] as const
 export type WebsiteSystem = typeof WEBSITE_SYSTEMS[number]
@@ -41,11 +42,13 @@ export interface RemoteApi {
   'POST remote/environments/:environment/catalog': { body: CatalogWrite; response: ManagedView }
   'PUT remote/environments/:environment/catalog/:resource': { body: CatalogWrite; response: ManagedView }
   'DELETE remote/environments/:environment/catalog/:resource': { body: { revision: number }; response: ManagedView }
+  'POST remote/environments/:environment/records/:resource/transfer': { body: RecordTransfer; response: ManagedView }
   'GET remote/environments/:environment/projects/:resource/summary': { response: ProjectSummaryView }
   'POST remote/environments/:environment/projects/:resource/summary': { response: ProjectSummaryView }
   'GET remote/export': { response: PortableBundle }
   'POST remote/import/preview': { body: { bundle: unknown }; response: ImportPreview }
-  'POST remote/import': { body: { bundle: unknown; revision: number; passwords: Record<string, string> }; response: ManagedView }
+  'POST remote/import': { body: { bundle: unknown; revision: number; passwords: Record<string, string>;
+    privateKeys?: Record<string, PrivateKeySecret> }; response: ManagedView }
 }
 
 type Path<K> = K extends `${string} ${infer P}` ? P : never

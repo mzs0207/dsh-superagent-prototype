@@ -6,7 +6,8 @@ import { afterEach, expect, it, vi } from 'vitest'
 import { registerRemoteHttp } from '../src/remote-ops/http.ts'
 import { ManagedRemoteOps } from '../src/remote-ops/managed.ts'
 import { apply, Config } from '../src/remote-ops/index.ts'
-import type { ProcessResult } from '../src/remote-ops/runner.ts'
+import type { ProcessLimits, ProcessResult } from '../src/remote-ops/runner.ts'
+import type { ProbeAddress, SshConnection } from '../src/remote-ops/managed-ssh.ts'
 import type { ManagedView, HostKeyProbe } from '../src/remote-ops/managed-types.ts'
 import { SHARED_ENVIRONMENT } from '../src/remote-ops/catalog-types.ts'
 
@@ -19,10 +20,9 @@ const processResult = (extra: Partial<ProcessResult> = {}): ProcessResult => ({ 
   stdout: 'fixture output', stderr: '', truncated: false, timedOut: false, cancelled: false, durationMs: 5, ...extra })
 async function host() {
   const dir = await mkdtemp(join(tmpdir(), 'dsh-managed-http-')); dirs.push(dir)
-  const probe = vi.fn(async (_address: import('../src/remote-ops/password-ssh.ts').ProbeAddress, _signal: AbortSignal,
-    _limits: import('../src/remote-ops/runner.ts').ProcessLimits) => fingerprint)
-  const run = vi.fn(async (_connection: import('../src/remote-ops/password-ssh.ts').PasswordConnection, _command: string | undefined,
-    _signal: AbortSignal, _limits: import('../src/remote-ops/runner.ts').ProcessLimits) => processResult())
+  const probe = vi.fn(async (_address: ProbeAddress, _signal: AbortSignal, _limits: ProcessLimits) => fingerprint)
+  const run = vi.fn(async (_connection: SshConnection, _command: string | undefined,
+    _signal: AbortSignal, _limits: ProcessLimits) => processResult())
   const remote = new ManagedRemoteOps(join(dir, 'remote-ops'), { probe, run })
   services.push(remote)
   type Handler = (req: unknown, res: unknown) => Promise<void>
@@ -421,4 +421,34 @@ it('does not carry an OMS password over to the community on the same origin', as
   const replaced = await h.call('PUT', `${route}/${resource}`, { ...fields, revision: 3, system: 'community' })
   expect(replaced).toMatchObject({ status: 400, body: { code: 'password_required' } })
   expect((await h.call('GET')).body).toMatchObject({ revision: 3, environments: [{ resources: [{ id: resource, system: 'oms' }] }, shared] })
+})
+
+it('copies and moves a database record without losing the credential or carrying Worker access', async () => {
+  const h = await host(), { environment } = await h.create()
+  let view = (await h.call('POST', 'environments', { revision: 2, name: 'Destination' })).body
+  const destination = view.environments.find(env => env.name === 'Destination')!.id
+  view = (await h.call('POST', `environments/${environment}/resources`, { revision: view.revision,
+    type: 'postgresql', name: 'Readonly', host: 'db.example.invalid', database: 'sample', username: 'readonly',
+    password: secret, allowWorker: true })).body
+  const resource = view.environments.find(env => env.id === environment)!.resources![0]!.id
+  const route = `environments/${environment}/records/${resource}/transfer`
+  const copy = { revision: view.revision, destination, mode: 'copy' }
+  expect((await h.call('POST', route, { ...copy, destination: environment })).status).toBe(400)
+  const copied = await h.call('POST', route, copy)
+  expect(copied.status).toBe(200)
+  expect(JSON.stringify(copied.body)).not.toContain(secret)
+  const duplicate = copied.body.environments.find(env => env.id === destination)!.resources![0]!
+  expect(duplicate).toMatchObject({ name: 'Readonly', allowWorker: false })
+  expect(duplicate.id).not.toBe(resource)
+  await expect(h.remote.store.resourceCredentials(destination, duplicate.id, copied.body.revision, false)).resolves.toMatchObject({ password: secret })
+  await expect(h.remote.store.resourceCredentials(destination, duplicate.id, copied.body.revision, true)).rejects.toMatchObject({ code: 'resource_not_allowed' })
+  await expect(h.remote.store.resourceCredentials(environment, resource, copied.body.revision, true)).resolves.toMatchObject({ password: secret })
+  expect((await h.call('POST', route, { ...copy, mode: 'move' })).status).toBe(409)
+  const moved = await h.call('POST', route, { ...copy, revision: copied.body.revision, mode: 'move' })
+  expect(moved).toMatchObject({ status: 200, body: { revision: copied.body.revision + 1 } })
+  expect(moved.body.environments.find(env => env.id === environment)!.resources ?? []).toEqual([])
+  expect(moved.body.environments.find(env => env.id === destination)!.resources).toMatchObject([
+    { id: duplicate.id, allowWorker: false }, { id: resource, allowWorker: false },
+  ])
+  await expect(h.remote.store.resourceCredentials(destination, resource, moved.body.revision, false)).resolves.toMatchObject({ password: secret })
 })

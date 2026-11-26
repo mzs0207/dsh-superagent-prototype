@@ -1,12 +1,12 @@
-/** Environment inventory management; password inputs are cleared on submission or unmount. */
+/** Environment inventory management; credential inputs are cleared on submission or unmount. */
 import { createContext, useCallback, useContext, useEffect, useId, useRef, useState, type FormEvent } from 'react'
 import type { ConnectionTest, HostKeyProbe, HostWrite, ManagedEnvironment, ManagedHost, ManagedProject, ManagedResource,
-  ManagedView, ResourceAction, ResourceWrite } from './managed-types.ts'
+  ManagedView, RecordTransfer, ResourceAction, ResourceWrite } from './managed-types.ts'
 import { Button, Icon, Input, Tag } from '../client/controls.tsx'
 import { Field, Fields } from '../client/settings-kit.tsx'
 import type { T } from '../client/text.ts'
 import { Hint, Section } from '../client/widgets.tsx'
-import { isWebsiteAddress, REMOTE_API, WEBSITE_SYSTEMS, type RemoteApi, type RemoteRequest, type WebsiteSystem } from './api.ts'
+import { isWebsiteAddress, MAX_PRIVATE_KEY_LENGTH, REMOTE_API, WEBSITE_SYSTEMS, type RemoteApi, type RemoteRequest, type WebsiteSystem } from './api.ts'
 import type { CatalogResource, CatalogWrite } from './catalog-types.ts'
 import type { ProjectSummaryView } from './project-refresh.ts'
 import type { ImportPreview } from './portable.ts'
@@ -32,8 +32,9 @@ async function call<K extends keyof RemoteApi>(route: K, ...[request]: {} extend
 
 const Language = createContext<T>(key => key)
 
-type Commit = (write: () => Promise<ManagedView>, selectNew?: boolean) => Promise<boolean>
+type Commit = (write: () => Promise<ManagedView>, select?: string) => Promise<boolean>
 interface Actions { commit: Commit; disabled: boolean; conflict: () => void }
+interface CardActions { onEdit: () => void; onTransfer?: () => void }
 const lines = (value: string) => value.split(/\r?\n/).map(item => item.trim()).filter(Boolean)
 // Never reflect server error bodies: even a faulty server must not echo a submitted password into the UI/toasts.
 const failureText = (t: T, failure: unknown) => t(failure instanceof RemoteRequestError && failure.status === 409 ? 'remoteConflict'
@@ -55,6 +56,51 @@ function DeleteInline({ name, environment, disabled, remove }: {
     onClick={() => setOpen(true)}>{t('remove')}</Button>
 }
 
+function RecordTransferEditor({ record, environment, environments, revision, actions, onCancel }: {
+  record: Pick<ManagedResource | ManagedHost | CatalogResource, 'id' | 'name' | 'type'>
+  environment: ManagedEnvironment; environments: ManagedEnvironment[]; revision: number; actions: Actions; onCancel: () => void
+}) {
+  const t = useContext(Language)
+  const [mode, setMode] = useState<RecordTransfer['mode']>('copy')
+  const [destination, setDestination] = useState('')
+  const targets = environments.filter(item => item.id !== environment.id)
+  const target = targets.find(item => item.id === destination)
+  const credentialResource = record.type === 'postgresql' || record.type === 'website-account'
+  const catalog = catalogTypes.some(type => type === record.type)
+  const submit = (event: FormEvent) => {
+    event.preventDefault()
+    if (!target || actions.disabled) return
+    void actions.commit(() => call('POST remote/environments/:environment/records/:resource/transfer', {
+      environment: environment.id, resource: record.id, body: { revision, mode, destination },
+    }), destination)
+  }
+  return <form className="dt-form dt-card" aria-label={t('remoteTransfer')} onSubmit={submit}>
+    <Fields disabled={actions.disabled}>
+      <h3 className="dt-block-title">{t('remoteTransferRecord', { name: record.name })}</h3>
+      <Field label={t('remoteTransferMode')}><select className="dt-select" value={mode}
+        onChange={event => setMode(event.target.value === 'move' ? 'move' : 'copy')}>
+        <option value="copy">{t('remoteTransferCopy')}</option>
+        <option value="move">{t('remoteTransferMove')}</option>
+      </select></Field>
+      <Field label={t('remoteTransferDestination')}><select className="dt-select" required value={destination}
+        onChange={event => setDestination(event.target.value)}>
+        <option disabled value="">{t('remoteTransferChoose')}</option>
+        {targets.map(item => <option key={item.id} value={item.id}>{item.name}{item.production ? ` · ${t('remoteProduction')}` : ''}</option>)}
+      </select></Field>
+      <Hint>{t(mode === 'copy' ? 'remoteTransferCopyHint' : 'remoteTransferMoveHint')}</Hint>
+      {!catalog && <Hint>{t('remoteTransferCredentialHint')}</Hint>}
+      {credentialResource && <Hint>{t('remoteTransferWorkerHint')}</Hint>}
+      {record.type === 'project' && mode === 'copy' && <Hint>{t('remoteTransferProjectHint')}</Hint>}
+      {target && (environment.production || target.production) && <p className="dt-banner">{t('remoteTransferProductionHint')}</p>}
+      {target && catalog && (environment.shared || target.shared) && <p className="dt-banner">{t('remoteTransferSharedHint')}</p>}
+      <div className="dt-actions">
+        <Button type="submit" variant="primary" disabled={!target}>{t(mode === 'copy' ? 'remoteTransferConfirmCopy' : 'remoteTransferConfirmMove')}</Button>
+        <Button onClick={onCancel}>{t('cancel')}</Button>
+      </div>
+    </Fields>
+  </form>
+}
+
 function EnvironmentEditor({ environment, revision, actions, onCancel }: {
   environment?: ManagedEnvironment; revision: number; actions: Actions; onCancel: () => void
 }) {
@@ -67,7 +113,7 @@ function EnvironmentEditor({ environment, revision, actions, onCancel }: {
     if (actions.disabled) return
     const body = { revision, name, aliases: lines(aliases), production }
     void actions.commit(() => environment ? call('PUT remote/environments/:environment', { environment: environment.id, body })
-      : call('POST remote/environments', { body }), !environment)
+      : call('POST remote/environments', { body }), environment ? undefined : 'new')
   }
   return <form className="dt-form dt-card" aria-label={t(environment ? 'remoteEditEnvironment' : 'remoteAddEnvironment')} onSubmit={submit}>
     <Fields disabled={actions.disabled}>
@@ -91,6 +137,24 @@ const projectWrite = ({ files, profiles, projectName, ...project }: ProjectDraft
   ...lines(files).length ? { files: lines(files) } : {}, ...projectName ? { projectName } : {},
   ...lines(profiles).length ? { profiles: lines(profiles) } : {} })
 
+function PrivateKeyFields({ id, label, required }: { id?: string; label?: string; required: boolean }) {
+  const t = useContext(Language)
+  const fields = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    const inputs = fields.current?.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>('input, textarea')
+    return () => inputs?.forEach(input => { input.value = ''; input.defaultValue = '' })
+  }, [])
+  return <div ref={fields} className="dt-form">
+    <Field label={label ?? t('remotePrivateKey')} note={t(required ? 'remotePrivateKeyPaste' : 'remotePrivateKeyKeep')}>
+      <textarea className="dt-textarea dt-mono" name={id ? `${id}:key` : 'privateKey'} rows={4} required={required}
+        maxLength={MAX_PRIVATE_KEY_LENGTH} autoComplete="off" spellCheck={false} autoCapitalize="off" />
+    </Field>
+    <Field label={t('remoteKeyPassphrase')} note={t('remoteKeyPassphraseHint')}>
+      <Input name={id ? `${id}:passphrase` : 'passphrase'} type="password" maxLength={4096} autoComplete="new-password" />
+    </Field>
+  </div>
+}
+
 function HostEditor({ host, environment, revision, actions, onCancel }: {
   host?: ManagedHost; environment: string; revision: number; actions: Actions; onCancel: () => void
 }) {
@@ -100,24 +164,31 @@ function HostEditor({ host, environment, revision, actions, onCancel }: {
   const [address, setAddress] = useState(host?.host ?? '')
   const [port, setPort] = useState(String(host?.port ?? 22))
   const [username, setUsername] = useState(host?.username ?? '')
-  const [password, setPassword] = useState('')
+  const [auth, setAuth] = useState<ManagedHost['auth']>(host?.auth ?? 'password')
   const [projects, setProjects] = useState(() => host?.projects.map(projectDraft) ?? [])
   const form = useRef<HTMLFormElement>(null)
   useEffect(() => {
-    const input = form.current?.querySelector<HTMLInputElement>('input[type="password"]')
-    // Clear even a detached DOM input retained by an integration; React state is discarded on unmount.
+    const input = form.current?.querySelector<HTMLInputElement>('input[name="password"]')
     return () => { if (input) { input.value = ''; input.defaultValue = '' } }
-  }, [])
-  const cancel = () => { setPassword(''); onCancel() }
+  }, [auth])
+  const needsCredential = host?.auth !== auth
   const setProject = (index: number, change: Partial<ProjectDraft>) => setProjects(previous => previous.map((project, at) => at === index
     ? { ...project, ...change } : project))
-  const submit = (event: FormEvent) => {
+  const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
-    if (actions.disabled || (!host && !password)) return
-    const body: HostWrite = { revision, name, host: address, port: Number(port), username, ...(notes || host?.notes ? { notes } : {}), ...password ? { password } : {},
-      projects: projects.map(projectWrite) }
-    // Do not retain a submitted credential while the request is in flight (or after failure).
-    setPassword('')
+    if (actions.disabled) return
+    const form = event.currentTarget
+    const data = new FormData(form)
+    const password = String(data.get('password') ?? '')
+    const privateKey = String(data.get('privateKey') ?? '').trim()
+    const passphrase = String(data.get('passphrase') ?? '')
+    if (needsCredential && !(auth === 'password' ? password : privateKey)) return
+    const body: HostWrite = { revision, name, host: address, port: Number(port), username, auth,
+      ...(notes || host?.notes ? { notes } : {}), ...(password && { password }), ...(privateKey && { privateKey }),
+      ...(passphrase && { passphrase }), projects: projects.map(projectWrite) }
+    // Clear only credentials; non-secret fields must survive a rejected request.
+    form.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>('[name="password"], [name="privateKey"], [name="passphrase"]')
+      .forEach(input => { input.value = '' })
     void actions.commit(() => host ? call('PUT remote/environments/:environment/hosts/:host', { environment, host: host.id, body })
       : call('POST remote/environments/:environment/hosts', { environment, body }))
   }
@@ -134,12 +205,18 @@ function HostEditor({ host, environment, revision, actions, onCancel }: {
       </div>
       <Field label={t('remoteUsername')}><Input required maxLength={100} autoComplete="off" spellCheck={false} value={username}
         onChange={event => setUsername(event.target.value)} /></Field>
-      <Field label={t('remotePassword')} note={t(host ? 'remotePasswordKeep' : 'remotePasswordRequired')}>
-        <Input type="password" required={!host} maxLength={4096} autoComplete="new-password" value={password}
-          onChange={event => setPassword(event.target.value)} /></Field>
+      <Field label={t('remoteAuthMethod')}>
+        <select className="dt-select" value={auth} onChange={event => setAuth(event.target.value === 'private-key' ? 'private-key' : 'password')}>
+          <option value="password">{t('remotePassword')}</option>
+          <option value="private-key">{t('remotePrivateKey')}</option>
+        </select>
+      </Field>
+      {auth === 'password' ? <Field label={t('remotePassword')} note={t(needsCredential ? 'remotePasswordRequired' : 'remotePasswordKeep')}>
+        <Input name="password" type="password" required={needsCredential} maxLength={4096} autoComplete="new-password" />
+      </Field> : <PrivateKeyFields required={needsCredential} />}
       <Field label={t('remoteNotes')} note={t('remoteNotesHint')}><textarea className="dt-textarea" maxLength={2000}
         value={notes} onChange={event => setNotes(event.target.value)} /></Field>
-      <Hint>{t('remotePasswordOnly')}</Hint>
+      <Hint>{t('remoteCredentialHint')}</Hint>
       <Section title={t('remoteProjects')} count={projects.length} action={<Button size="sm" icon={<Icon name="plus" />}
         onClick={() => setProjects(previous => [...previous, { id: '', directory: '', files: '', profiles: '' }])}>{t('remoteAddProject')}</Button>}>
         <Hint>{t('remoteProjectsHint')}</Hint>
@@ -163,13 +240,13 @@ function HostEditor({ host, environment, revision, actions, onCancel }: {
           </div></details>
         </div>)}
       </Section>
-      <div className="dt-actions"><Button type="submit" variant="primary">{t('save')}</Button><Button onClick={cancel}>{t('cancel')}</Button></div>
+      <div className="dt-actions"><Button type="submit" variant="primary">{t('save')}</Button><Button onClick={onCancel}>{t('cancel')}</Button></div>
     </Fields>
   </form>
 }
 
-function HostCard({ host, environment, revision, actions, onEdit }: {
-  host: ManagedHost; environment: string; revision: number; actions: Actions; onEdit: () => void
+function HostCard({ host, environment, revision, actions, onEdit, onTransfer }: CardActions & {
+  host: ManagedHost; environment: string; revision: number; actions: Actions
 }) {
   const t = useContext(Language)
   const [probe, setProbe] = useState<HostKeyProbe>()
@@ -205,7 +282,7 @@ function HostCard({ host, environment, revision, actions, onEdit }: {
   return <article className="dt-card dt-remote-host" aria-label={host.name}>
     <div className="dt-card-head"><div className="dt-row-main"><h3 className="dt-block-title">{host.name}</h3>
       <span className="dt-hint dt-mono">{host.username}@{host.host}:{host.port}</span></div>
-      <Tag>{t('remoteLinux')}</Tag></div>
+      <div className="dt-actions"><Tag>{t('remoteLinux')}</Tag><Tag>{t(host.auth === 'private-key' ? 'remotePrivateKey' : 'remotePassword')}</Tag></div></div>
     {host.notes && <Hint>{host.notes}</Hint>}
     <Hint>{t('remoteFingerprint')}</Hint>
     <code className="dt-mono">{host.hostKeyFingerprint ?? t('remoteUntrusted')}</code>
@@ -222,6 +299,7 @@ function HostCard({ host, environment, revision, actions, onEdit }: {
           if (live.current) setResult(value)
         }) }}>{t('remoteTest')}</Button>
         <Button size="sm" onClick={onEdit}>{t('remoteEditHost')}</Button>
+        {onTransfer && <Button size="sm" onClick={onTransfer}>{t('remoteTransfer')}</Button>}
         <DeleteInline name={host.name} disabled={disabled} remove={() => actions.commit(() => call(
           'DELETE remote/environments/:environment/hosts/:host', params))} />
       </div>
@@ -340,8 +418,8 @@ function ResourceEditor({ type, resource, environment, revision, actions, onCanc
   </form>
 }
 
-function ResourceCard({ resource, environment, revision, actions, onEdit }: {
-  resource: ManagedResource; environment: ManagedEnvironment; revision: number; actions: Actions; onEdit: () => void
+function ResourceCard({ resource, environment, revision, actions, onEdit, onTransfer }: CardActions & {
+  resource: ManagedResource; environment: ManagedEnvironment; revision: number; actions: Actions
 }) {
   const t = useContext(Language)
   const [pending, setPending] = useState<ResourceAction>()
@@ -372,6 +450,7 @@ function ResourceCard({ resource, environment, revision, actions, onEdit }: {
         <Button size="sm" disabled={disabled || environment.production} onClick={() => { void check('api') }}>{t('remoteTestApi')}</Button>
       </>}
       <Button size="sm" disabled={disabled} onClick={onEdit}>{t('remoteEditResource')}</Button>
+      {onTransfer && <Button size="sm" disabled={disabled} onClick={onTransfer}>{t('remoteTransfer')}</Button>}
       <DeleteInline name={resource.name} disabled={disabled}
         remove={() => actions.commit(() => call('DELETE remote/environments/:environment/resources/:resource', { ...params, body: { revision } }))} />
     </div>
@@ -512,8 +591,8 @@ function RepositorySummary({ environment, resource, disabled }: { environment: s
   </Section>
 }
 
-function CatalogCard({ item, environment, revision, projects, actions, onEdit }: {
-  item: CatalogResource; environment: string; revision: number; projects: ProjectChoice[]; actions: Actions; onEdit: () => void
+function CatalogCard({ item, environment, revision, projects, actions, onEdit, onTransfer }: CardActions & {
+  item: CatalogResource; environment: string; revision: number; projects: ProjectChoice[]; actions: Actions
 }) {
   const t = useContext(Language)
   const [summary, setSummary] = useState(false)
@@ -522,6 +601,7 @@ function CatalogCard({ item, environment, revision, projects, actions, onEdit }:
       <div className="dt-actions">
         {item.type === 'project' && <Button size="sm" aria-expanded={summary} onClick={() => setSummary(value => !value)}>{t('remoteSummary')}</Button>}
         <Button size="sm" disabled={actions.disabled} onClick={onEdit}>{t('remoteEditResource')}</Button>
+        {onTransfer && <Button size="sm" disabled={actions.disabled} onClick={onTransfer}>{t('remoteTransfer')}</Button>}
         <DeleteInline name={item.name} disabled={actions.disabled} remove={() => actions.commit(() => call(
           'DELETE remote/environments/:environment/catalog/:resource', { environment, resource: item.id, body: { revision } }))} />
       </div>
@@ -557,9 +637,13 @@ function TransferConfiguration({ actions }: { actions: Actions }) {
     event.preventDefault()
     if (!preview || actions.disabled) return
     const form = event.currentTarget
-    const passwords = Object.fromEntries([...new FormData(form)].map(([id, value]) => [id, String(value)]))
+    const data = new FormData(form)
+    const passwords = Object.fromEntries(preview.passwords.map(({ id }) => [id, String(data.get(id) ?? '')]))
+    const privateKeys = Object.fromEntries((preview.privateKeys ?? []).map(({ id }) => [id,
+      { privateKey: String(data.get(`${id}:key`) ?? '').trim(), passphrase: String(data.get(`${id}:passphrase`) ?? '') }]))
     form.reset()
-    if (await actions.commit(() => call('POST remote/import', { body: { bundle, revision: preview.revision, passwords } }))) {
+    if (await actions.commit(() => call('POST remote/import', { body: { bundle, revision: preview.revision, passwords,
+      ...(preview.privateKeys?.length && { privateKeys }) } }))) {
       setPreview(undefined); setBundle(undefined)
     }
   }
@@ -586,6 +670,8 @@ function TransferConfiguration({ actions }: { actions: Actions }) {
         {preview.passwords.map(item => <Field key={item.id} label={`${t('remoteResourcePassword')} — ${item.environment} / ${item.name}`}>
           <Input name={item.id} type="password" required maxLength={4096} autoComplete="new-password" />
         </Field>)}
+        {preview.privateKeys?.map(item => <PrivateKeyFields key={item.id} id={item.id} required
+          label={`${t('remotePrivateKey')} — ${item.environment} / ${item.name}`} />)}
         <div className="dt-actions"><Button type="submit" variant="primary" disabled={!preview.added}>{t('remoteImportConfirm')}</Button>
           <Button onClick={() => { setPreview(undefined); setBundle(undefined) }}>{t('cancel')}</Button></div>
       </Fields>
@@ -598,6 +684,7 @@ function EnvironmentPanel({ environment, revision, environments, actions }: {
 }) {
   const t = useContext(Language)
   const [editor, setEditor] = useState<string>()
+  const [transferId, setTransferId] = useState<string>()
   const editingHost = environment.hosts.find(host => host.id === editor)
   const resources = environment.resources ?? []
   const editingResource = resources.find(resource => resource.id === editor)
@@ -605,6 +692,10 @@ function EnvironmentPanel({ environment, revision, environments, actions }: {
   const catalog = environment.catalog ?? []
   const editingCatalog = catalog.find(item => item.id === editor)
   const catalogType = editingCatalog?.type ?? catalogTypes.find(type => type === editor)
+  const transferRecord = environment.hosts.find(item => item.id === transferId) ?? resources.find(item => item.id === transferId)
+    ?? catalog.find(item => item.id === transferId)
+  const openTransfer = (id: string) => environments.length > 1 ? () => setTransferId(id) : undefined
+  const editing = editor !== undefined || transferRecord !== undefined
   const projects = environments.flatMap(env => (env.catalog ?? []).filter(item => item.type === 'project')
     .map(item => ({ id: item.id, label: `${env.name} / ${item.name}` })))
   return <div className="dt-remote-main">
@@ -612,7 +703,7 @@ function EnvironmentPanel({ environment, revision, environments, actions }: {
       onCancel={() => setEditor(undefined)} /> : <Section title={environment.name}
       badge={environment.shared ? <Tag>{t('remoteShared')}</Tag> : environment.production ? <Tag tone="warning">{t('remoteProduction')}</Tag> : undefined}
       action={!environment.shared && <div className="dt-actions">
-        <Button size="sm" disabled={actions.disabled} onClick={() => setEditor('environment')}>{t('remoteEditEnvironment')}</Button>
+        <Button size="sm" disabled={actions.disabled || !!transferRecord} onClick={() => setEditor('environment')}>{t('remoteEditEnvironment')}</Button>
         <DeleteInline environment name={environment.name} disabled={actions.disabled} remove={() => actions.commit(() => call(
           'DELETE remote/environments/:environment', { environment: environment.id, body: { revision } }))} />
       </div>}>
@@ -621,25 +712,27 @@ function EnvironmentPanel({ environment, revision, environments, actions }: {
     </Section>}
     {editor !== 'environment' && <Section title={t('remoteResources')} count={environment.hosts.length + resources.length + catalog.length}
       action={<div className="dt-actions">
-        <Button size="sm" icon={<Icon name="plus" />} disabled={actions.disabled || editor !== undefined}
+        <Button size="sm" icon={<Icon name="plus" />} disabled={actions.disabled || editing}
           onClick={() => setEditor('new')}>{t('remoteAddHost')}</Button>
-        <Button size="sm" disabled={actions.disabled || editor !== undefined} onClick={() => setEditor('postgresql')}>{t('remoteAddPostgres')}</Button>
-        <Button size="sm" disabled={actions.disabled || editor !== undefined} onClick={() => setEditor('website-account')}>{t('remoteAddWebsite')}</Button>
-        {catalogTypes.map(type => <Button key={type} size="sm" disabled={actions.disabled || editor !== undefined}
+        <Button size="sm" disabled={actions.disabled || editing} onClick={() => setEditor('postgresql')}>{t('remoteAddPostgres')}</Button>
+        <Button size="sm" disabled={actions.disabled || editing} onClick={() => setEditor('website-account')}>{t('remoteAddWebsite')}</Button>
+        {catalogTypes.map(type => <Button key={type} size="sm" disabled={actions.disabled || editing}
           onClick={() => setEditor(type)}>{t(`remoteAddCatalog.${type}`)}</Button>)}
       </div>}>
-      {editor === 'new' || editingHost ? <HostEditor key={editor} host={editingHost} environment={environment.id} revision={revision}
+      {transferRecord ? <RecordTransferEditor record={transferRecord} environment={environment} environments={environments}
+        revision={revision} actions={actions} onCancel={() => setTransferId(undefined)} /> : editor === 'new' || editingHost
+        ? <HostEditor key={editor} host={editingHost} environment={environment.id} revision={revision}
         actions={actions} onCancel={() => setEditor(undefined)} /> : resourceType
         ? <ResourceEditor key={editor} type={resourceType} resource={editingResource} environment={environment.id} revision={revision}
           actions={actions} onCancel={() => setEditor(undefined)} /> : catalogType ? <CatalogEditor key={editor} type={catalogType}
           resource={editingCatalog} environment={environment.id} revision={revision} actions={actions} projects={projects}
           onCancel={() => setEditor(undefined)} /> : <>
           {environment.hosts.map(host => <HostCard key={host.id} host={host} environment={environment.id} revision={revision}
-            actions={actions} onEdit={() => setEditor(host.id)} />)}
+            actions={actions} onEdit={() => setEditor(host.id)} onTransfer={openTransfer(host.id)} />)}
           {resources.map(resource => <ResourceCard key={resource.id} resource={resource} environment={environment} revision={revision}
-            actions={actions} onEdit={() => setEditor(resource.id)} />)}
+            actions={actions} onEdit={() => setEditor(resource.id)} onTransfer={openTransfer(resource.id)} />)}
           {catalog.map(item => <CatalogCard item={item} key={item.id} environment={environment.id} revision={revision}
-            projects={projects} actions={actions} onEdit={() => setEditor(item.id)} />)}
+            projects={projects} actions={actions} onEdit={() => setEditor(item.id)} onTransfer={openTransfer(item.id)} />)}
           {!environment.hosts.length && !resources.length && !catalog.length && <Hint>{t('remoteNoResources')}</Hint>}
         </>}
     </Section>}
@@ -675,17 +768,17 @@ function Inventory() {
     finally { if (live.current && request.current === id) setLoading(false) }
   }, [call, t])
   useEffect(() => { live.current = true; void reload(); return () => { live.current = false; request.current++ } }, [reload])
-  const commit: Commit = async (write, selectNew) => {
+  const commit: Commit = async (write, select) => {
     if (writing.current || loading || conflict || !view) return false
     writing.current = true; setBusy(true); setError(undefined)
-    const oldIds = view.environments.map(item => item.id)
+    const oldIds = select === 'new' ? new Set(view.environments.map(item => item.id)) : undefined
     try {
       const next = await write()
       if (!live.current) return false
       setView(current => current && current.revision > next.revision ? current : next)
       setCreating(false)
-      setSelected(current => selectNew ? next.environments.find(item => !oldIds.includes(item.id))?.id ?? current
-        : next.environments.some(item => item.id === current) ? current : next.environments[0]?.id)
+      setSelected(current => oldIds ? next.environments.find(item => !oldIds.has(item.id))?.id ?? current
+        : select ?? (next.environments.some(item => item.id === current) ? current : next.environments[0]?.id))
       return true
     } catch (failure) {
       if (live.current) { setError(failureText(t, failure)); if (failure instanceof RemoteRequestError && failure.status === 409) setConflict(true) }

@@ -2,7 +2,7 @@
 import { z } from 'zod'
 import { isIP } from 'node:net'
 import { ProjectSchema } from './inventory.ts'
-import { isWebsiteAddress, WEBSITE_SYSTEMS } from './api.ts'
+import { isWebsiteAddress, MAX_PRIVATE_KEY_LENGTH, WEBSITE_SYSTEMS } from './api.ts'
 import { CATALOG_TYPES, type CatalogResource } from './catalog-types.ts'
 
 const clean = (max: number) => z.string().trim().min(1).max(max).refine(value => !/[\u0000-\u001f\u007f-\u009f]/u.test(value), 'Control characters are not allowed')
@@ -50,12 +50,20 @@ export const ResourceActionSchema = z.object({ environment: clean(100), resource
 export const ResourceLoginSchema = z.object({ environment: clean(100), resource: z.uuid(), mode: z.enum(['api', 'web']) }).strict()
 export const ResourceSessionReadSchema = ResourceLoginSchema.extend({ path: ReadPath })
 export type WebsiteMode = z.infer<typeof ResourceLoginSchema>['mode']
+export const HostAuthSchema = z.enum(['password', 'private-key'])
+export const PrivateKeySecretSchema = z.object({
+  privateKey: z.string().min(1).max(MAX_PRIVATE_KEY_LENGTH), passphrase: PasswordSchema,
+}).strict()
+export type PrivateKeySecret = z.output<typeof PrivateKeySecretSchema>
+export type SshSecret = { password: string; privateKey?: never; passphrase?: never } | (PrivateKeySecret & { password?: never })
 export const HostWriteSchema = z.object({ revision: RevisionSchema, name: clean(100), host: AddressSchema,
   port: z.number().int().min(1).max(65535).default(22), username: clean(100).regex(/^[A-Za-z0-9_][A-Za-z0-9_.-]*\$?$/),
-  // Passwords are opaque: do not trim, reflect in errors, or put in snapshots returned to the UI.
-  password: PasswordSchema, notes: NotesSchema,
+  auth: HostAuthSchema.optional(), password: PasswordSchema,
+  privateKey: PrivateKeySecretSchema.shape.privateKey.optional(), passphrase: PasswordSchema, notes: NotesSchema,
   projects: z.array(ProjectSchema).max(50).default([]) }).strict()
 export const DeleteSchema = z.object({ revision: RevisionSchema }).strict()
+export const RecordTransferSchema = z.object({ revision: RevisionSchema, destination: z.uuid(), mode: z.enum(['copy', 'move']) }).strict()
+export type RecordTransfer = z.input<typeof RecordTransferSchema>
 export const FingerprintSchema = z.string().regex(/^SHA256:[A-Za-z0-9+/]{43}$/)
 export const TrustSchema = z.object({ revision: RevisionSchema, token: z.string().uuid() }).strict()
 export const ProbeSchema = z.object({ revision: RevisionSchema }).strict()
@@ -73,7 +81,7 @@ export interface ManagedHost {
   host: string
   port: number
   username: string
-  auth: 'password'
+  auth: z.infer<typeof HostAuthSchema>
   hasPassword: boolean
   hostKeyFingerprint: string | null
   projects: ManagedProject[]
@@ -86,7 +94,7 @@ export interface ManagedView { revision: number; environments: ManagedEnvironmen
 export interface HostKeyProbe { fingerprint: string; token: string; expiresAt: string }
 export interface ConnectionTest { ok: boolean; message: string; durationMs: number }
 /** Internal-only connection material; no HTTP response or tool output may serialize this type. */
-export interface HostCredentials { revision: number; host: ManagedHost; password: string }
+export type HostCredentials = { revision: number; host: ManagedHost } & SshSecret
 /** Stable, non-sensitive management failures; never include request bodies or crypto/SSH internals. */
 export class RemoteManagementError extends Error {
   constructor(readonly status: 400 | 404 | 409 | 500, readonly code: string, message: string) { super(message) }

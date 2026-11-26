@@ -438,16 +438,16 @@ The independent remote-ops tool plugin preserves legacy inventoryFile/OpenSSH mo
 | `src/remote-ops/commands.ts` | All-target preflight, fixed read-only Docker/Linux commands, shell-data quoting and hardened noninteractive OpenSSH argv |
 | `src/remote-ops/runner.ts` | Bounded stdout/stderr, timeout/cancellation/process-group cleanup, shared connection slots for tests/probes/diagnostics, managed transport adapter and per-server evidence without workspace switching |
 | `src/remote-ops/managed-types.ts` | Strict public UI write schemas, password-free environment/host DTOs and non-sensitive errors; browser consumers import types only |
-| `src/remote-ops/managed-store.ts` | Private lazy AES-256-GCM vault: UUID AAD, owner/permission/file-type checks, atomic snapshots, serialized revision CAS, credential-free views and drain-on-close |
+| `src/remote-ops/managed-store.ts` | Private AES-256-GCM vault: UUID AAD, owner/permission checks, revision-checked record transfers, atomic snapshots, credential-free views and drain-on-close |
 | `src/remote-ops/catalog-types.ts` | Stable shared-environment ID, project/relationship/person/team schemas and explicit per-project model consent |
 | `src/remote-ops/repository.ts` | Bounded read-only Git object access, commit-diff layer snapshots, filtered model evidence and two Markdown views |
 | `src/remote-ops/project-refresh.ts` | Commit polling, manual refresh, cancellation, bounded tool-free DSH model summaries and retained good snapshots |
 | `src/remote-ops/portable.ts` | Strict versioned import/export contract, conflict-free ID merge planning and missing-credential preview |
-| `src/remote-ops/password-ssh.ts` | ssh2 password authentication, unauthenticated fingerprint probe, strict fingerprint pins, bounded command output and cancellable connection-only tests |
+| `src/remote-ops/managed-ssh.ts` | ssh2 password or private-key authentication, unauthenticated fingerprint probe, strict pins, bounded command output and cancellable connection tests |
 | `src/remote-ops/managed.ts` | Owns the encrypted store, endpoint/revision-bound SSH trust, and short-lived website logins scoped to an agent, resource, mode and vault revision |
 | `src/remote-ops/resource-checks.ts` | TLS PostgreSQL checks and OMS, WorksBase Community and ZenTao Web/API authentication, read-only access and response redaction |
 | `src/remote-ops/api.ts`, `http.ts` | Independent `/environment-resources` page and credential-safe management API on the local DSH web server |
-| `src/remote-ops/client.tsx`, `page.tsx`, `theme.css` | Shared bilingual settings and standalone UI: connection and catalog CRUD, revision-checked import/export, Git summaries, ephemeral passwords and SSH trust |
+| `src/remote-ops/client.tsx`, `page.tsx`, `theme.css` | Shared bilingual settings and standalone UI: connection and catalog CRUD, record transfers, import/export, Git summaries, ephemeral credentials and SSH trust |
 | `src/mobile/gateway.ts` | Private HTTP listener: password login, bounded authentication, fixed loopback task projections, allowlisted JSON conversation writes and cancellable SSE forwarding |
 | `src/mobile/cli.ts` | Private password-hash setup, password changes and foreground viewer lifecycle; leaves the DSH profile unchanged |
 | `src/mobile/view.html`, `view.js`, `view.css` | Touch task/conversation tabs, safe text rendering, pagination/history, in-page drafts, stable submission IDs and visibility-aware polling/streaming |
