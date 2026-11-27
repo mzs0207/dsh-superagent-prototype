@@ -8,7 +8,7 @@ import { Store } from '../src/app/store.ts'
 import { Effects, Later } from '../src/app/effects.ts'
 import { OptimizationLedger, optimizationFailure } from '../src/app/optimization.ts'
 import { HealthBoard } from '../src/infra/health.ts'
-import { Commands } from '../src/infra/commands.ts'
+import { Commands, commandError } from '../src/infra/commands.ts'
 
 let h: Host
 beforeEach(async () => { h = await startRuntime() })
@@ -148,6 +148,24 @@ it('retains real effect failures after recovery and reopening SQLite, but not La
   } finally { await effects.drain(); store.close() }
   const reopened = new Store(path), second = new OptimizationLedger(reopened, new HealthBoard().claim('optimization'), () => {}, () => clock)
   try { expect(second.records().items.map(row => row.status).sort()).toEqual(['failed', 'succeeded']) } finally { reopened.close() }
+})
+
+it('retains CLI reply status and known Feishu throttling in the ledger without retaining command output', () => {
+  const ledger = new OptimizationLedger(h.runtime.store, new HealthBoard().claim('optimization'), () => {})
+  const at = new Date().toISOString()
+  const fail = (id: string, stderr: string) =>
+    ledger.effect({ id, at, kind: 'reply', durationMs: 1, status: 'failed', error: commandError({ stderr, code: 1 }) })
+  fail('throttled', 'gh: private response (HTTP 429)')
+  fail('unavailable', 'glab: private response (HTTP 503)')
+  fail('feishu-rate-limit', '{"error":{"code":99991400,"message":"private response"}}')
+  fail('other-platform-code', '{"error":{"code":503,"message":"private response"}}')
+  const entries = ledger.records().items
+  const diagnostic = (id: string) => entries.find(entry => entry.id === id)?.errors
+  expect(diagnostic('throttled')).toEqual([{ reason: 'rate-limited', name: 'Error', status: 429 }])
+  expect(diagnostic('unavailable')).toEqual([{ reason: 'http-5xx', name: 'Error', status: 503 }])
+  expect(diagnostic('feishu-rate-limit')).toEqual([{ reason: 'rate-limited', name: 'Error', code: '99991400' }])
+  expect(diagnostic('other-platform-code')).toEqual([{ reason: 'unknown', name: 'Error' }])
+  expect(JSON.stringify(entries)).not.toContain('private response')
 })
 
 it('keeps pagination stable within a fixed time window and rejects invalid bounds', async () => {

@@ -3,6 +3,7 @@ import { z } from 'zod'
 import { randomUUID } from 'node:crypto'
 import { key, latestAssignment, type DomainEvent, type Ticket, type WaitReason } from '../core/index.ts'
 import { KV } from '../kv.ts'
+import { CliError } from '../infra/commands.ts'
 import type { HealthEntry } from '../infra/health.ts'
 import type { Store } from './store.ts'
 import type { EffectKind } from './effects.ts'
@@ -65,10 +66,12 @@ const ERROR_NAMES: Readonly<Record<string, true>> = {
   Error: true, AggregateError: true, TypeError: true, ReferenceError: true, SyntaxError: true,
   RangeError: true, TimeoutError: true, AbortError: true,
 }
+const FEISHU_RATE_LIMIT = 99_991_400
 const ERROR_CODES: Readonly<Record<string, string>> = {
   ETIMEDOUT: 'timeout', ECONNRESET: 'network', ECONNREFUSED: 'network', EAI_AGAIN: 'network', ENOTFOUND: 'network', EPIPE: 'network',
   PREPARE_FAILED: 'prepare-failed', SUBAGENT_CATALOG_UNAVAILABLE: 'catalog-unavailable',
   AUTH: 'authentication-failed',
+  [FEISHU_RATE_LIMIT]: 'rate-limited',
 }
 /** Visit at most 64 entries (including repeats), retaining at most eight allowlisted diagnostics. */
 export function optimizationFailure(error: unknown): FailureObservation {
@@ -82,7 +85,8 @@ export function optimizationFailure(error: unknown): FailureObservation {
     const row = value as { name?: unknown; code?: unknown; status?: unknown; message?: unknown; cause?: unknown; errors?: unknown }
     const name = typeof row.name === 'string' && Object.hasOwn(ERROR_NAMES, row.name) ? row.name : undefined
     const login = row.message === 'ChatGPT sign-in needs to be renewed'
-    const code = typeof row.code === 'string' && Object.hasOwn(ERROR_CODES, row.code) ? row.code : undefined
+    const candidate = value instanceof CliError && row.code === FEISHU_RATE_LIMIT ? String(FEISHU_RATE_LIMIT) : row.code
+    const code = typeof candidate === 'string' && Object.hasOwn(ERROR_CODES, candidate) ? candidate : undefined
     const status = typeof row.status === 'number' && Number.isInteger(row.status) && row.status >= 400 && row.status <= 599 ? row.status : undefined
     let reason = code ? ERROR_CODES[code]! : 'unknown'
     if (login) reason = 'auth-required'

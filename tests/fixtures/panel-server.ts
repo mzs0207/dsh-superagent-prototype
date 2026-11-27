@@ -199,7 +199,8 @@ const overviewView = (): ApiResponse<'GET overview'> => {
       // As on the host, every entry in error that is not a Source's own, a Policy sync, or the individually listed unavailable Evals is a runtime-error.
       ...Object.entries(server.health).filter(([name, item]) => item.state === 'error' && !KINDS.some(kind => kind.health.includes(name))
         && !name.startsWith('sync:') && name !== 'evals')
-        .map(([name, item]) => ({ kind: 'runtime-error' as const, name, detail: item.detail })),
+        .map(([name, item]) => ({ kind: 'runtime-error' as const, name, detail: item.detail,
+          ...(item.code ? { code: item.code, values: item.values } : {}) })),
       ...Object.values(server.settings.policy.sources).some(part => part.allowed.length) ? [] : [{ kind: 'no-allowed' as const }],
       ...server.failing.map(outgoing => ({ kind: 'outgoing' as const, outgoing }))],
     person: server.person, executor: { running: 2, queued: 0, maxWorkers: server.settings.executor.maxWorkers, idle: 1 },

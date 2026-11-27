@@ -59,6 +59,18 @@ async function api(method: string, path: string): Promise<{ status: number; body
   await http(req, { writeHead: (code: number) => { status = code }, end: (data: string) => { text = data } })
   return { status, body: JSON.parse(text) }
 }
+
+it('includes a runtime health problem code and its interpolation values in the overview', () => {
+  const personal = { state: 'error', detail: 'Sign in again', code: 'personalAuth' } as const
+  const memory = { state: 'error', detail: 'Recall provider is offline', code: 'pollFailures',
+    values: { count: '3', error: 'offline' } } as const
+  const view = overview(viewsOf(runtime), { 'feishu-personal': personal, memory }, policyVersion(runtime.store.settings()),
+    executorLoad(runtime.store, runtime.executor.activeCount()))
+  expect(view.problems).toEqual(expect.arrayContaining([
+    { kind: 'runtime-error', name: 'feishu-personal', detail: personal.detail, code: personal.code, values: undefined },
+    { kind: 'runtime-error', name: 'memory', detail: memory.detail, code: memory.code, values: memory.values },
+  ]))
+})
 let agents: Map<string, { id: string; status: string; inbox: { nextTurn: UserMessage[]; nextStep: UserMessage[] }; cancel: ReturnType<typeof vi.fn>; inject: ReturnType<typeof vi.fn> }>
 const runTool = async (sessionId: string, name: string, args: unknown) => {
   const tool = tools.get(sessionId)?.get(name)

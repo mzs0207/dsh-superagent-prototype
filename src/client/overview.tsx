@@ -36,7 +36,8 @@ function ProblemLine({ problem, onChanged }: { problem: Problem; onChanged: () =
       <ConfirmButton variant="outline" icon="play" label={t('resumeProcessing')} title={t('resumeProcessing')}
         message={t('resumeProcessingConfirm')}
         onConfirm={async () => { await call('POST executor/pause', { body: { paused: false } }); await onChanged() }} />)
-    case 'runtime-error': return row(t('problemRuntime', { name: valueLabel(t, 'health', problem.name) }), raw(problem.detail), undefined)
+    case 'runtime-error': return row(t('problemRuntime', { name: valueLabel(t, 'health', problem.name) }),
+      problem.code ? worded(healthText(t, problem)) : raw(problem.detail), undefined)
     case 'source-error': {
       const health = problem.source.health
       return row(t('sourceError', { source: localized(t, problem.source.title) }), health.code ? worded(healthText(t, health))

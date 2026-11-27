@@ -190,6 +190,8 @@ If a configured conversation cannot be verified, the observer does not read that
 
 3. Open **Eval → Personal Feishu follow-ups**. The observer starts at the current time on first use and keeps at most 100 summaries in local SQLite, not the original message body. It never creates a Trigger or Ticket, executes a task, or replies. Global pause pauses observation. Remove the file to disable observation; sign out from the personal CLI profile to clear its login.
 
+`status` reports a distinct `feishu-personal` component; it does not conflate personal observation with the Feishu bot. The panel shows a localized failure category and, in Eval, when the last successful scan was committed. That timestamp does not indicate whether the history cursor has caught up. Reauthorize only the dedicated personal profile if it requires sign-in. A failed scan does not advance its cursor.
+
 ### Hindsight memory (optional)
 
 Create `<stateDir>/hindsight.json` with mode `0600`, outside the repository, then restart the DSH profile:
@@ -399,6 +401,7 @@ If recorder initialization fails, its health remains `error`; later events canno
 
 Recorded facts: task/assignment lifecycle, worker report states, explicit retries, human input/resumption, scheduled worker retries, actual effect success/failure, and prepare/launch/execution/background/cleanup failure boundaries. Failed observations include up to eight allowlisted diagnostics from nested `cause` / `AggregateError.errors`: error type, recognized OS/application code and HTTP status. Reasons include `timeout`, `network`, `rate-limited`, `http-5xx`, `type-error`, `prepare-failed` and `catalog-unavailable`; unrecognized facts remain `unknown`. Cycles and oversized chains are bounded. Worker health shows the same safe internal diagnostic chain; historical records are not backfilled. `Later` holds (pause, worker slots, earlier messages) are not failures. No raw task titles, chats/reports, tool output, error messages/stacks, accounts, recipients or credentials are copied.
 Traversal also stops after examining 64 entries, including repeated or invalid entries, even if fewer than eight diagnostics were retained.
+Outbound CLI failures retain an explicitly reported HTTP status or an allowlisted application code, such as Feishu throttling (`99991400`). Application codes are not reinterpreted as HTTP statuses, and diagnostics do not change the reply retry policy.
 
 The recognized Codex login-renewal error is `auth-required`; other HTTP 401 or structured `AUTH` errors are `authentication-failed`. Only the former prompts sign-in again. Generic authentication failures prompt a check of startup credentials or model provider credentials, depending on where they occurred. Neither schedules a Worker retry or changes models. The ledger never stores error messages. A write failure takes precedence over other writes in the same commit; only a new record committed in a later transaction without errors clears recorder health `error`.
 

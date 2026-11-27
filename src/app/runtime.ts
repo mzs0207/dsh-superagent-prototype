@@ -117,7 +117,8 @@ export class Runtime extends Service implements SourceHost {
       const masterId = this.masterId = store.get(KV.runtime.masterId) ?? `orchestrator-${key(machine.stateDir)}`
       store.set(KV.runtime.masterId, masterId)
       this.personal = new FeishuPersonal(store, machine.stateDir, ctx.llm,
-        () => store.settings().eval.model ?? ctx.agents.get(masterId as SessionId)?.model.current(), () => this.paused())
+        () => store.settings().eval.model ?? ctx.agents.get(masterId as SessionId)?.model.current(), () => this.paused(),
+        this.board.claim('feishu-personal'))
       const commands = this.commands = new Commands(() => setup.deployment, setup.commandEnvironment, this.lifetime)
       const board = this.board
       const effects = this.effects = new Effects(store, board, undefined, attempt => this.optimization.effect(attempt))

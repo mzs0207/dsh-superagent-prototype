@@ -9,11 +9,11 @@ import { gitlabEnvironment } from './environment.ts'
 const exec = promisify(execFile)
 const TIMEOUT_MS = 90_000
 /**
- * Error thrown by Commands when a CLI invocation fails, capturing stderr diagnostics, API error codes, and exit status without echoing command arguments.
+ * Error thrown by Commands when a CLI invocation fails, retaining API codes, explicit HTTP statuses, and exit codes separately.
  * Source channels and pollers inspect its code to distinguish deleted conversations from retryable failures.
  */
 export class CliError extends Error {
-  constructor(message: string, readonly code?: number, readonly exitCode?: number) { super(message) }
+  constructor(message: string, readonly code?: number, readonly exitCode?: number, readonly status?: number) { super(message) }
 }
 /** Extracts a sanitized error from a failed subprocess without echoing argv, which may contain message text. */
 export function commandError(error: unknown, program = 'command'): Error {
@@ -27,7 +27,10 @@ export function commandError(error: unknown, program = 'command'): Error {
     const code = parsed?.error?.code
     if (parsed?.error?.message) return new CliError(`${parsed.error.message}${code ? ` (${code})` : ''}`, code, exitCode)
     // `gh` exits non-zero on HTTP errors (such as `gh: Not Found (HTTP 404)`) and on `gh: HTTP 304`, which ETag polling relies on.
-    if (stderr) return new CliError(stderr.slice(0, 2000), Number(/\bHTTP (\d{3})\b/.exec(stderr)?.[1]) || undefined, exitCode)
+    if (stderr) {
+      const status = Number(/\bHTTP (\d{3})\b/.exec(stderr)?.[1]) || undefined
+      return new CliError(stderr.slice(0, 2000), status, exitCode, status)
+    }
   }
   return new CliError(`${basename(program)} ${ended(error)}`, undefined, exitCode)
 }
@@ -51,7 +54,7 @@ export function validItems<T>(item: z.ZodType<T>, list: readonly unknown[], tall
 function membership(error: unknown): unknown {
   if (!(error instanceof CliError) || error.code !== 232011) return error
   const hint = 'The Feishu bot is not a member of the chat. Add the bot in the chat settings, then retry.'
-  return new CliError(hint, error.code, error.exitCode)
+  return new CliError(hint, error.code, error.exitCode, error.status)
 }
 /**
  * Executes gh, lark-cli, and git subprocesses with deployment account credentials, timeouts, and abort signals.

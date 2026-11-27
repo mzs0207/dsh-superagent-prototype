@@ -55,7 +55,8 @@ export function overview(host: ViewHost, health: HealthMap, policyVersionValue: 
     // Unavailable Evals behind the `evals` health entry are listed individually as `eval-unavailable` below.
     ...Object.entries(health).filter(([name, item]) => item.state === 'error' && !sourceParts.has(name) && !name.startsWith('sync:')
       && name !== 'evals')
-      .map(([name, item]) => ({ kind: 'runtime-error' as const, name, detail: item.detail })),
+      .map(([name, item]) => ({ kind: 'runtime-error' as const, name, detail: item.detail,
+        ...(item.code ? { code: item.code, values: item.values } : {}) })),
     ...evaluating.filter(thread => thread.evaluating!.deadline < now)
       .map(thread => ({ kind: 'eval-overdue' as const, thread: threadSummary(view, thread) })),
     ...unjudged(store, since).map(({ thread, decision }) => ({ kind: 'eval-unavailable' as const, decisionId: decision.id,

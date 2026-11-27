@@ -14,6 +14,11 @@ export const HEALTH_TEXT = {
   feishuCliUnset: 'The Source is on, and its bot lark-cli is not set',
   feishuBotMissing: 'Waiting for the Feishu bot',
   pollFailures: '{count} consecutive failed polls; last: {error}',
+  personalConfig: 'Check the private Feishu personal observer configuration.',
+  personalAuth: 'Sign in again with the configured Feishu personal account.',
+  personalRead: 'Check access to the configured Feishu conversations and the Feishu CLI connection.',
+  personalAssessment: 'Check the assessment model used by the Feishu personal observer.',
+  personalStorage: 'Check local storage for Feishu personal observation.',
 } as const
 export type HealthCode = keyof typeof HEALTH_TEXT
 export type Health = { state: 'starting' | 'ready' | 'paused' | 'error'; detail: string; at?: string; code?: HealthCode; values?: Record<string, string> }

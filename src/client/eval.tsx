@@ -9,14 +9,16 @@ import { SaveBar } from './draft.tsx'
 import { useAction, usePanel } from './provider.tsx'
 import { DecisionLine } from './rows.tsx'
 import { ConfigHistory, Field, Fields, ModelField, SourceField, numberOf, useBlockDraft, useSettings } from './settings-kit.tsx'
-import { localized, valueLabel, when } from './text.ts'
+import { fullTime, localized, valueLabel, when } from './text.ts'
 import { Hint, LabelValue, LoadMore, LoadState, Section, StatusHead } from './widgets.tsx'
 
 function PersonalTodos() {
   const { t, call } = usePanel()
   const { data } = usePoll(() => call('GET feishu-personal'), [])
   if (!data || data.state === 'off') return null
-  return <Section title={t('personalTodoTitle')} hint={t(`personalTodoState.${data.state}`)}>
+  return <Section title={t('personalTodoTitle')} hint={data.problem ? undefined : t(`personalTodoState.${data.state}`)}>
+    {data.problem && <Hint>{t(`healthCode.${data.problem}`)}</Hint>}
+    {data.lastSuccessAt && <Hint>{t('personalLastSuccessAt', { time: fullTime(data.lastSuccessAt, t('lang')) })}</Hint>}
     {data.items.length ? <ul className="dt-list">{data.items.map(item => <li key={item.id} className="dt-row">
       <div className="dt-row-main">
         <strong>{item.title}</strong>

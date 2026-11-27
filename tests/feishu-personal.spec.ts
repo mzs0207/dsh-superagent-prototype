@@ -1,11 +1,12 @@
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
-import { classifyPersonal, observePersonal } from '../src/app/feishu-personal.ts'
+import { classifyPersonal, FeishuPersonal, observePersonal } from '../src/app/feishu-personal.ts'
 import { Store } from '../src/app/store.ts'
 import { collectPersonal } from '../src/sources/feishu-personal-reader.ts'
+import { HealthBoard } from '../src/infra/health.ts'
 
 const now = 1_800_000_000_000
 const scope = { self: 'ou_me', name: '小王', groups: ['oc_inside'], directs: [] }
@@ -38,7 +39,7 @@ function chatApi() {
 function openStore() {
   const dir = mkdtempSync(join(tmpdir(), 'observe-feishu-'))
   const store = new Store(join(dir, 'orchestrator.sqlite'))
-  return { store, close: () => { store.close(); rmSync(dir, { recursive: true, force: true }) } }
+  return { store, dir, close: () => { store.close(); rmSync(dir, { recursive: true, force: true }) } }
 }
 
 describe('Feishu personal observation', () => {
@@ -107,6 +108,37 @@ describe('Feishu personal observation', () => {
       expect(await observePersonal(store, source, now + 20_000, signal)).toHaveLength(1)
       expect(read.mock.calls.map(args => args[0])).toEqual([now, now])
     } finally { close() }
+  })
+
+  it('reports missing user authorization without leaking CLI diagnostics or erasing the last successful poll', async () => {
+    const { store, dir, close } = openStore()
+    const stop = new AbortController(), board = new HealthBoard()
+    let running: Promise<void> | undefined
+    try {
+      const completed = Date.now(), started = completed - 10_000, prior = started - 10_000
+      const read = vi.fn(async () => { vi.setSystemTime(completed); return [] })
+      const source = { id: scope.self, read, classify: async () => null }
+      vi.useFakeTimers({ toFake: ['Date'] })
+      try {
+        vi.setSystemTime(started)
+        await observePersonal(store, source, prior, stop.signal)
+        await observePersonal(store, source, started, stop.signal)
+      } finally { vi.useRealTimers() }
+      expect(read).toHaveBeenCalledWith(prior, started - 5000, stop.signal)
+      const cli = join(dir, 'lark-cli')
+      writeFileSync(cli, `#!/bin/sh
+printf '%s\\n' '{"ok":false,"error":{"type":"authentication","subtype":"token_missing","message":"private-cli-diagnostic"}}' >&2
+exit 3
+`, { mode: 0o700 })
+      writeFileSync(join(dir, 'feishu-personal.json'), JSON.stringify({ ...scope, cli, configDir: dir }), { mode: 0o600 })
+      const observer = new FeishuPersonal(store, dir, { stream: vi.fn() }, () => ({ provider: 'test', model: 'test' }), () => false,
+        board.claim('feishu-personal'))
+      running = observer.run(stop.signal)
+      await vi.waitFor(() => expect(observer.view().state).toBe('error'))
+      expect(observer.view()).toEqual({ state: 'error', problem: 'personalAuth', lastSuccessAt: new Date(completed).toISOString(), items: [] })
+      expect(board.all['feishu-personal']).toMatchObject({ state: 'error', code: 'personalAuth' })
+      expect(JSON.stringify(board.all)).not.toContain('private-cli-diagnostic')
+    } finally { stop.abort(); await running; close() }
   })
 
   it('keeps candidate text out of agent sessions and rejects a model tool-call finish', async () => {

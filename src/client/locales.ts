@@ -55,6 +55,7 @@ const TEXT = {
   'source.github-issue': ['GitHub Issue', 'GitHub Issue'],
   'health.github': ['GitHub 来源', 'GitHub Source'],
   'health.feishu': ['飞书来源', 'Feishu Source'],
+  'health.feishu-personal': ['飞书个人待办', 'Personal Feishu follow-ups'],
   'health.history': ['飞书补收', 'Feishu recovery'],
   'health.runtime': ['dsh-superagent', 'dsh-superagent'],
   'health.models': ['模型服务', 'Model service'],
@@ -424,6 +425,7 @@ const TEXT = {
   'personalTodoState.paused': ['观察已暂停。', 'Observation is paused.'],
   'personalTodoState.ready': ['只识别待办，不创建工单、不执行、不回复。', 'Identifies follow-ups without starting tickets, executing work or replying.'],
   'personalTodoState.error': ['本轮读取或识别失败，未推进进度；检查个人只读授权和评估模型。', 'This read or assessment failed without advancing progress. Check the personal read-only authorization and assessment model.'],
+  personalLastSuccessAt: ['最近一次成功扫描：{time}', 'Last successful scan: {time}'],
   'personalTodoKind.direct': ['私聊', 'Direct message'],
   'personalTodoKind.group': ['内部群', 'Internal group'],
   personalNoTodos: ['暂无识别出的待办。', 'No follow-ups identified.'],
@@ -957,6 +959,11 @@ const TEXT = {
   'healthCode.feishuCliUnset': ['来源已打开，还没有设置机器人的 lark-cli', HEALTH_TEXT.feishuCliUnset],
   'healthCode.feishuBotMissing': ['等待飞书机器人', HEALTH_TEXT.feishuBotMissing],
   'healthCode.pollFailures': ['连续 {count} 次轮询失败，最近一次：{error}', HEALTH_TEXT.pollFailures],
+  'healthCode.personalConfig': ['检查飞书个人观察的私有配置。', HEALTH_TEXT.personalConfig],
+  'healthCode.personalAuth': ['请用配置对应的飞书个人账号重新授权。', HEALTH_TEXT.personalAuth],
+  'healthCode.personalRead': ['检查所选飞书会话是否可读，以及 CLI 连接是否正常。', HEALTH_TEXT.personalRead],
+  'healthCode.personalAssessment': ['检查飞书个人观察使用的评估模型。', HEALTH_TEXT.personalAssessment],
+  'healthCode.personalStorage': ['检查飞书个人观察的本地存储。', HEALTH_TEXT.personalStorage],
 } as const satisfies Record<string, readonly [string, string]>
 export type DshSuperagentKey = keyof typeof TEXT
 const language = (index: 0 | 1) => Object.fromEntries(Object.entries(TEXT).map(([key, pair]) => [key, pair[index]])) as Record<DshSuperagentKey, string>

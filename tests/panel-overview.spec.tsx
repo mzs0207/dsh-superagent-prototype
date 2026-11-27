@@ -107,10 +107,16 @@ it('counts the messages not sent in the last day, linking to the Source status, 
 })
 
 it('names a failing part of dsh-superagent itself by its label', async () => {
-  server.health = { launch: { state: 'error', detail: 'spawn failed' }, relay: { state: 'ready', detail: 'Nothing waiting' } }
+  server.health = {
+    'feishu-personal': { state: 'error', code: 'personalAuth', detail: en['healthCode.personalAuth'] },
+    launch: { state: 'error', detail: 'spawn failed' },
+    relay: { state: 'ready', detail: 'Nothing waiting' },
+  }
   await mount()
   expect(all('.dt-cards .dt-att-what').map(item => item.textContent)).toContain(zh.problemRuntime.replace('{name}', zh['health.launch']))
   expect(text()).toContain('spawn failed')
+  expect(text()).toContain(zh['healthCode.personalAuth'])
+  expect(text()).not.toContain(en['healthCode.personalAuth'])
 })
 
 it('words a refused retry in the interface language by its code', async () => {
